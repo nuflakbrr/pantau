@@ -27,14 +27,53 @@ use sensors::thermal::{self, ThermalProbe};
 use sensors::{
     disk, display_refresh, gpu, memory, network, system, wifi, SensorGroup, SensorHistory, SensorId, SensorReading,
 };
-use values::{resolve_color, severity_dot, FormatKind, FormatOptions, SizeUnit, PERCENT_BANDS, TEMPERATURE_BANDS};
+use values::{FormatKind, FormatOptions, SizeUnit};
 
-fn percent_dot(value: f64) -> &'static str {
-    resolve_color(value, &PERCENT_BANDS).map(severity_dot).unwrap_or("")
+/// SF Symbol name per sensor/category — mirrors vitals-gnome's own
+/// `icons/*-symbolic.svg` set (cpu/memory/temperature/voltage/gpu/network/
+/// fan/system/storage/battery) conceptually, using macOS's built-in SF
+/// Symbols instead of bundling SVG assets (same no-bundled-assets policy
+/// already used for the flag emoji). `None` if no reasonable match exists;
+/// the row just shows no icon rather than a wrong one.
+fn sensor_icon_name(key: &str) -> Option<&'static str> {
+    match key {
+        "cpu_total" => Some("cpu"),
+        "cpu_temp" => Some("thermometer"),
+        "mem_usage" => Some("memorychip"),
+        "swap_usage" => Some("arrow.triangle.2.circlepath"),
+        "disk_usage" => Some("internaldrive"),
+        "uptime" => Some("clock"),
+        "net_up" => Some("arrow.up.circle"),
+        "net_down" => Some("arrow.down.circle"),
+        "wifi_quality" => Some("wifi"),
+        "public_ip" => Some("globe"),
+        "voltage_avg" => Some("bolt.fill"),
+        "display_hz" => Some("display"),
+        k if k.starts_with("fan_") => Some("fanblades.fill"),
+        _ => None,
+    }
 }
 
-fn temp_dot(value: f64) -> &'static str {
-    resolve_color(value, &TEMPERATURE_BANDS).map(severity_dot).unwrap_or("")
+fn category_icon_name(category_name: &str) -> Option<&'static str> {
+    match category_name {
+        "CPU" => Some("cpu"),
+        "Memory" => Some("memorychip"),
+        "System" => Some("gearshape"),
+        "Storage" => Some("internaldrive"),
+        "Network" => Some("network"),
+        "Battery" => Some("battery.100"),
+        "GPU" => Some("display"),
+        _ => None,
+    }
+}
+
+fn set_menu_item_icon(item: &NSMenuItem, symbol: Option<&'static str>) {
+    let Some(symbol) = symbol else { return };
+    if let Some(icon) = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(symbol), None)
+    {
+        icon.setTemplate(true);
+        item.setImage(Some(&icon));
+    }
 }
 
 /// Fixed display order for pinnable summary rows, per user preference —
@@ -388,11 +427,7 @@ impl AppDelegate {
                 key: "cpu_total",
                 label: "CPU",
                 raw_value: cpu.aggregate_percent,
-                formatted: format!(
-                    "{}CPU: {}",
-                    percent_dot(cpu.aggregate_percent),
-                    FormatKind::Percent.format(cpu.aggregate_percent, opts)
-                ),
+                formatted: format!("CPU: {}", FormatKind::Percent.format(cpu.aggregate_percent, opts)),
             enabled: true,
         });
         }
@@ -401,7 +436,7 @@ impl AppDelegate {
                 key: "mem_usage",
                 label: "Memory",
                 raw_value: v,
-                formatted: format!("{}Memory: {}", percent_dot(v), FormatKind::Percent.format(v, opts)),
+                formatted: format!("Memory: {}", FormatKind::Percent.format(v, opts)),
             enabled: true,
         });
         }
@@ -410,7 +445,7 @@ impl AppDelegate {
                 key: "swap_usage",
                 label: "Swap",
                 raw_value: v,
-                formatted: format!("{}Swap: {}", percent_dot(v), FormatKind::Percent.format(v, opts)),
+                formatted: format!("Swap: {}", FormatKind::Percent.format(v, opts)),
             enabled: true,
         });
         }
@@ -419,7 +454,7 @@ impl AppDelegate {
                 key: "disk_usage",
                 label: "Storage",
                 raw_value: v,
-                formatted: format!("{}Storage: {}", percent_dot(v), FormatKind::Percent.format(v, opts)),
+                formatted: format!("Storage: {}", FormatKind::Percent.format(v, opts)),
             enabled: true,
         });
         }
@@ -474,15 +509,10 @@ impl AppDelegate {
             descriptors.push(SensorDescriptor {
                 key: "cpu_temp",
                 label: "CPU Temp",
-                // Threshold-band comparisons (percent_dot/temp_dot) and
-                // dedupe both stay in Celsius regardless of display unit —
-                // only the formatted text converts.
+                // Dedupe stays in Celsius regardless of display unit — only
+                // the formatted text converts.
                 raw_value: celsius,
-                formatted: format!(
-                    "{}CPU Temp: {:.1}\u{00B0}{unit_symbol}",
-                    temp_dot(celsius),
-                    display_temp
-                ),
+                formatted: format!("CPU Temp: {display_temp:.1}\u{00B0}{unit_symbol}"),
                 enabled,
             });
         }
@@ -695,6 +725,7 @@ impl AppDelegate {
                     }
                     item.setState(state);
                     item.setEnabled(descriptor.enabled);
+                    set_menu_item_icon(&item, sensor_icon_name(descriptor.key));
                     menu.insertItem_atIndex(&item, i as isize);
                     rows.push(item);
                 }
@@ -909,6 +940,7 @@ impl AppDelegate {
                 submenu.setDelegate(Some(ProtocolObject::from_ref(self)));
                 let item = NSMenuItem::new(mtm);
                 item.setTitle(&NSString::from_str(name));
+                set_menu_item_icon(&item, category_icon_name(name));
                 item.setSubmenu(Some(submenu));
                 menu.addItem(&item);
             }

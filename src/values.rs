@@ -116,29 +116,6 @@ pub const TEMPERATURE_BANDS: [ColorThreshold; 3] = [
     ColorThreshold { threshold: 85.0, rgba: RED },
 ];
 
-/// Renders a resolved severity color as a colored-dot prefix. NSMenuItem's
-/// per-item foreground color fights the system's own selection-highlight
-/// tinting in AppKit, so a Unicode dot is a more reliable signal than
-/// `NSAttributedString` coloring across light/dark mode and hover states.
-pub fn severity_dot(rgba: (u8, u8, u8, u8)) -> &'static str {
-    match rgba {
-        GREEN => "\u{1F7E2} ",
-        YELLOW => "\u{1F7E1} ",
-        RED => "\u{1F534} ",
-        _ => "",
-    }
-}
-
-pub fn resolve_color(value: f64, bands: &[ColorThreshold]) -> Option<(u8, u8, u8, u8)> {
-    let mut sorted: Vec<&ColorThreshold> = bands.iter().collect();
-    sorted.sort_by(|a, b| a.threshold.partial_cmp(&b.threshold).unwrap());
-    sorted
-        .into_iter()
-        .filter(|band| value >= band.threshold)
-        .last()
-        .map(|band| band.rgba)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,15 +152,4 @@ mod tests {
         assert_eq!(format_runtime(3661.0), "01:01:01");
     }
 
-    #[test]
-    fn threshold_picks_highest_matching_band() {
-        let bands = [
-            ColorThreshold { threshold: 0.0, rgba: (0, 255, 0, 255) },
-            ColorThreshold { threshold: 60.0, rgba: (255, 255, 0, 255) },
-            ColorThreshold { threshold: 80.0, rgba: (255, 0, 0, 255) },
-        ];
-        assert_eq!(resolve_color(75.0, &bands), Some((255, 255, 0, 255)));
-        assert_eq!(resolve_color(80.0, &bands), Some((255, 0, 0, 255)));
-        assert_eq!(resolve_color(-1.0, &bands), None);
-    }
 }
