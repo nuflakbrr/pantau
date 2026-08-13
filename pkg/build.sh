@@ -9,10 +9,13 @@ cd "$(dirname "$0")/.."
 cargo build --release
 
 STAGE="$(mktemp -d)/Pantau.app"
-mkdir -p "$STAGE/Contents/MacOS"
+mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
 cp target/release/pantau-app "$STAGE/Contents/MacOS/pantau-app"
 cp pkg/Info.plist "$STAGE/Contents/Info.plist"
+cp assets/AppIcon.icns "$STAGE/Contents/Resources/AppIcon.icns"
 codesign --force --deep --sign - "$STAGE"
+
+pkill -x pantau-app 2>/dev/null || true
 
 rm -rf "/Applications/Pantau.app"
 cp -R "$STAGE" /Applications/

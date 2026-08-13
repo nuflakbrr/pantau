@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump type"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Bump version
+        id: bump
+        run: |
+          set -euo pipefail
+          CURRENT="$(grep -m1 '^version' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          case "${{ inputs.bump }}" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+          NEW="${MAJOR}.${MINOR}.${PATCH}"
+          sed -i '' "s/^version = \".*\"/version = \"${NEW}\"/" Cargo.toml
+          sed -i '' "0,/<key>CFBundleShortVersionString<\/key>/{n;s#<string>.*</string>#<string>${NEW}</string>#}" pkg/Info.plist
+          sed -i '' "0,/<key>CFBundleVersion<\/key>/{n;s#<string>.*</string>#<string>${{ github.run_number }}</string>#}" pkg/Info.plist
+          echo "version=${NEW}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release .zip
+        run: ./pkg/release.sh
+
+      - name: Commit version bump and tag
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock pkg/Info.plist
+          git commit -m "chore: bump version to v${{ steps.bump.outputs.version }}"
+          git tag "v${{ steps.bump.outputs.version }}"
+          git push origin HEAD:main
+          git push origin "v${{ steps.bump.outputs.version }}"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ steps.bump.outputs.version }}" \
+            "pkg/Pantau-v${{ steps.bump.outputs.version }}.zip" \
+            --title "v${{ steps.bump.outputs.version }}" \
+            --generate-notes

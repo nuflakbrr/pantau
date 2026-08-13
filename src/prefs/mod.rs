@@ -20,8 +20,8 @@
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSBackingStoreType, NSButton, NSButtonType, NSPopUpButton, NSSegmentedControl, NSTextField, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSBackingStoreType, NSButton, NSButtonType, NSImage, NSImageView, NSPopUpButton, NSSegmentedControl, NSTextField,
+    NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{ns_string, MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 use std::cell::{OnceCell, RefCell};
@@ -586,6 +586,16 @@ fn build_network_pane(mtm: MainThreadMarker, c: &PrefsWindowController, s: &Sett
 
 fn build_about_pane(mtm: MainThreadMarker) -> Retained<NSView> {
     let view = container_view(mtm);
+    // `imageNamed` resolves against the main bundle's Resources (where
+    // `pkg/build.sh`/`release.sh` copy `assets/AppIcon.icns`) — returns
+    // `None` gracefully when run as a raw dev binary with no bundle, so
+    // the pane just shows text-only rather than a broken image well.
+    if let Some(logo) = NSImage::imageNamed(ns_string!("AppIcon")) {
+        let image_view = NSImageView::new(mtm);
+        image_view.setFrame(NSRect { origin: NSPoint { x: 0.0, y: 340.0 }, size: NSSize { width: 64.0, height: 64.0 } });
+        image_view.setImage(Some(&logo));
+        view.addSubview(&image_view);
+    }
     view.addSubview(&label(mtm, "pantau-app", 310.0));
     view.addSubview(&label(mtm, "Native macOS system monitor.", 280.0));
     view.addSubview(&label(mtm, "Rewritten from vitals-gnome (GPL-2.0) — clean-room,", 250.0));

@@ -1,15 +1,17 @@
 mod prefs;
 mod sensors;
 mod settings;
+mod updater;
 mod values;
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSAttributedStringAttachmentConveniences,
-    NSControlStateValueOff, NSControlStateValueOn, NSFont, NSFontWeightRegular, NSImage, NSMenu, NSMenuDelegate,
-    NSMenuItem, NSStatusBar, NSStatusItem, NSTextAttachment, NSVariableStatusItemLength,
+    NSAlert, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
+    NSAttributedStringAttachmentConveniences, NSControlStateValueOff, NSControlStateValueOn, NSFont,
+    NSFontWeightRegular, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem, NSTextAttachment,
+    NSVariableStatusItemLength,
 };
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSAttributedString, NSMutableAttributedString, NSNotification, NSObject,
@@ -78,6 +80,21 @@ fn set_menu_item_icon(item: &NSMenuItem, symbol: Option<&'static str>) {
         // size instead of trusting auto-scaling.
         icon.setSize(objc2_foundation::NSSize { width: 16.0, height: 16.0 });
         item.setImage(Some(&icon));
+    }
+}
+
+/// Shows/hides the status bar's gauge glyph — hidden once pins are shown
+/// (their own icons + values already fill the space) so the fixed-width
+/// gauge doesn't eat into the tray's tight character budget.
+fn set_status_gauge_icon(button: &objc2_app_kit::NSButton, show: bool) {
+    if !show {
+        button.setImage(None);
+        return;
+    }
+    if let Some(icon) = NSImage::imageWithSystemSymbolName_accessibilityDescription(ns_string!("gauge"), None) {
+        icon.setTemplate(true); // auto-tints for light/dark menu bar
+        button.setImage(Some(&icon));
+        button.setImagePosition(objc2_app_kit::NSCellImagePosition::ImageLeft);
     }
 }
 
@@ -157,6 +174,14 @@ struct AppDelegateIvars {
     battery_time_left: RefCell<TimeLeftEstimator>,
     battery_time_left_display: RefCell<battery::TimeLeftDisplay>,
     battery_health: RefCell<battery::BatteryHealthWatcher>,
+    /// Set while a "Check for Updates" request is in flight; polled from
+    /// the timer tick since the network check runs on a background thread.
+    update_check: RefCell<Option<std::sync::mpsc::Receiver<updater::UpdateCheckResult>>>,
+    /// Set while a download+install is in flight, for the (rare) failure
+    /// path — success exits the process directly from the background
+    /// thread (the freshly-downloaded copy is already launched by then),
+    /// so there's nothing to marshal back for that case.
+    update_install: RefCell<Option<std::sync::mpsc::Receiver<Result<(), String>>>>,
     public_ip_watcher: RefCell<PublicIpWatcher>,
     /// `None` if `AppleSMC` couldn't be opened at all (should not happen on
     /// real Mac hardware, but never assume) — thermal rows are simply
@@ -205,13 +230,7 @@ define_class!(
             if let Some(button) = item.button(mtm) {
                 button.setTitle(ns_string!("Pantau"));
                 if !self.ivars().settings.borrow().hide_icons {
-                    if let Some(icon) =
-                        NSImage::imageWithSystemSymbolName_accessibilityDescription(ns_string!("gauge"), None)
-                    {
-                        icon.setTemplate(true); // auto-tints for light/dark menu bar
-                        button.setImage(Some(&icon));
-                        button.setImagePosition(objc2_app_kit::NSCellImagePosition::ImageLeft);
-                    }
+                    set_status_gauge_icon(&button, true);
                 }
                 if self.ivars().settings.borrow().fixed_widths {
                     let font = NSFont::monospacedDigitSystemFontOfSize_weight(
@@ -254,6 +273,8 @@ define_class!(
         #[unsafe(method(pollTick:))]
         fn poll_tick(&self, _timer: &NSTimer) {
             self.poll_tick_impl(false);
+            self.poll_update_check();
+            self.poll_update_install();
         }
 
         #[unsafe(method(pinToggle:))]
@@ -270,13 +291,6 @@ define_class!(
                     self.poll_tick_impl(true);
                 }
             }
-        }
-
-        #[unsafe(method(refreshTapped:))]
-        fn refresh_tapped(&self, _sender: &NSMenuItem) {
-            self.ivars().cpu_sampler.replace(CpuSampler::new());
-            self.ivars().history.replace(SensorHistory::new());
-            self.poll_tick_impl(true);
         }
 
         #[unsafe(method(systemMonitorTapped:))]
@@ -299,6 +313,14 @@ define_class!(
                 }
             }
         }
+
+        #[unsafe(method(checkForUpdatesTapped:))]
+        fn check_for_updates_tapped(&self, _sender: &NSMenuItem) {
+            if self.ivars().update_check.borrow().is_some() {
+                return; // a check is already in flight
+            }
+            *self.ivars().update_check.borrow_mut() = Some(updater::check_async());
+        }
     }
 );
 
@@ -320,6 +342,8 @@ impl AppDelegate {
             battery_time_left: RefCell::new(TimeLeftEstimator::new()),
             battery_time_left_display: RefCell::new(battery::TimeLeftDisplay::new()),
             battery_health: RefCell::new(battery::BatteryHealthWatcher::new()),
+            update_check: RefCell::new(None),
+            update_install: RefCell::new(None),
             public_ip_watcher: RefCell::new(PublicIpWatcher::new()),
             smc: OnceCell::new(),
             thermal_probe: OnceCell::new(),
@@ -339,6 +363,87 @@ impl AppDelegate {
         let mut settings = self.ivars().settings.borrow_mut();
         settings.hot_sensors = hot.iter().cloned().collect();
         let _ = settings.save();
+    }
+
+    /// Polled every timer tick — non-blocking `try_recv` on whatever
+    /// background check is in flight, showing an `NSAlert` once a result
+    /// lands (must run on the main thread, hence polling here rather than
+    /// building the alert from the background thread directly).
+    fn poll_update_check(&self) {
+        let result = {
+            let rx = self.ivars().update_check.borrow();
+            rx.as_ref().and_then(|rx| rx.try_recv().ok())
+        };
+        let Some(result) = result else { return };
+        *self.ivars().update_check.borrow_mut() = None;
+
+        let mtm = self.mtm();
+        let alert = NSAlert::new(mtm);
+        match result {
+            updater::UpdateCheckResult::UpToDate => {
+                alert.setMessageText(&NSString::from_str("You're up to date"));
+                alert.setInformativeText(&NSString::from_str(&format!(
+                    "Pantau v{} is the latest version.",
+                    updater::CURRENT_VERSION
+                )));
+                alert.addButtonWithTitle(&NSString::from_str("OK"));
+                alert.runModal();
+            }
+            updater::UpdateCheckResult::Error(e) => {
+                alert.setAlertStyle(NSAlertStyle::Warning);
+                alert.setMessageText(&NSString::from_str("Update check failed"));
+                alert.setInformativeText(&NSString::from_str(&e));
+                alert.addButtonWithTitle(&NSString::from_str("OK"));
+                alert.runModal();
+            }
+            updater::UpdateCheckResult::UpdateAvailable { version, download_url } => {
+                alert.setMessageText(&NSString::from_str("Update Available"));
+                alert.setInformativeText(&NSString::from_str(&format!(
+                    "v{} is available (you have v{}). Download and install now?",
+                    version,
+                    updater::CURRENT_VERSION
+                )));
+                alert.addButtonWithTitle(&NSString::from_str("Download & Install"));
+                alert.addButtonWithTitle(&NSString::from_str("Later"));
+                let response = alert.runModal();
+                if response == objc2_app_kit::NSAlertFirstButtonReturn {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let outcome = updater::download_and_install(&download_url);
+                        if outcome.is_ok() {
+                            // The freshly-installed copy is already
+                            // launched at this point (see
+                            // `download_and_install`) — a hard exit here
+                            // is the intended handoff, not an error path.
+                            std::process::exit(0);
+                        }
+                        let _ = tx.send(outcome);
+                    });
+                    *self.ivars().update_install.borrow_mut() = Some(rx);
+                }
+            }
+        }
+    }
+
+    fn poll_update_install(&self) {
+        let result = {
+            let rx = self.ivars().update_install.borrow();
+            rx.as_ref().and_then(|rx| rx.try_recv().ok())
+        };
+        let Some(Err(e)) = result else {
+            if result.is_some() {
+                *self.ivars().update_install.borrow_mut() = None;
+            }
+            return;
+        };
+        *self.ivars().update_install.borrow_mut() = None;
+        let mtm = self.mtm();
+        let alert = NSAlert::new(mtm);
+        alert.setAlertStyle(NSAlertStyle::Warning);
+        alert.setMessageText(&NSString::from_str("Update install failed"));
+        alert.setInformativeText(&NSString::from_str(&e));
+        alert.addButtonWithTitle(&NSString::from_str("OK"));
+        alert.runModal();
     }
 
     fn schedule_timer(&self) {
@@ -643,10 +748,12 @@ impl AppDelegate {
         let hot = self.ivars().hot_sensors.borrow();
         let pinned: Vec<&SensorDescriptor> = descriptors.iter().filter(|d| hot.contains(d.key)).collect();
         if pinned.is_empty() {
-            // Default fallback when nothing is pinned — the gauge icon
-            // (set once at launch) stays visible either way.
+            if !self.ivars().settings.borrow().hide_icons {
+                set_status_gauge_icon(&button, true);
+            }
             button.setTitle(ns_string!("Pantau"));
         } else {
+            set_status_gauge_icon(&button, false);
             // Icon + bare value per pin (vitals-gnome style — "[cpu] 9%"
             // instead of "CPU: 9%") via NSAttributedString/NSTextAttachment,
             // since a plain NSButton title can't mix images and text.
@@ -1000,9 +1107,9 @@ impl AppDelegate {
                 }
                 menu.addItem(&item);
             };
-            action_row("Refresh", sel!(refreshTapped:));
             action_row("System Monitor", sel!(systemMonitorTapped:));
-            action_row("Preferences...", sel!(preferencesTapped:));
+            action_row(&format!("Check for Updates (v{})", updater::CURRENT_VERSION), sel!(checkForUpdatesTapped:));
+            action_row("Preferences", sel!(preferencesTapped:));
 
             self.ivars().menu_structure_built.set(true);
         }
