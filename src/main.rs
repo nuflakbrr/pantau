@@ -5,15 +5,15 @@ mod values;
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSControlStateValueOff,
-    NSControlStateValueOn, NSFont, NSFontWeightRegular, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar,
-    NSStatusItem, NSVariableStatusItemLength,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSAttributedStringAttachmentConveniences,
+    NSControlStateValueOff, NSControlStateValueOn, NSFont, NSFontWeightRegular, NSImage, NSMenu, NSMenuDelegate,
+    NSMenuItem, NSStatusBar, NSStatusItem, NSTextAttachment, NSVariableStatusItemLength,
 };
 use objc2_foundation::{
-    ns_string, MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes,
-    NSString, NSTimer,
+    ns_string, MainThreadMarker, NSAttributedString, NSMutableAttributedString, NSNotification, NSObject,
+    NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer,
 };
 use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -72,8 +72,26 @@ fn set_menu_item_icon(item: &NSMenuItem, symbol: Option<&'static str>) {
     if let Some(icon) = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(symbol), None)
     {
         icon.setTemplate(true);
+        // SF Symbol images come back at their natural glyph size, which
+        // can be larger than a menu row's fixed height and get clipped
+        // into invisibility — pin it to the standard small menu-item icon
+        // size instead of trusting auto-scaling.
+        icon.setSize(objc2_foundation::NSSize { width: 16.0, height: 16.0 });
         item.setImage(Some(&icon));
     }
+}
+
+/// SF Symbol rendered as an inline `NSAttributedString` fragment (one
+/// `NSTextAttachment` character) — for embedding an icon glyph directly
+/// inside a plain-text button title, vitals-gnome style (icon + value, no
+/// text label), since `NSButton` titles otherwise can't mix images and text.
+fn icon_attachment_string(symbol: &str) -> Option<Retained<NSAttributedString>> {
+    let icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(symbol), None)?;
+    icon.setTemplate(true);
+    icon.setSize(objc2_foundation::NSSize { width: 13.0, height: 13.0 });
+    let attachment = NSTextAttachment::new();
+    attachment.setImage(Some(&icon));
+    Some(NSAttributedString::attributedStringWithAttachment(&attachment))
 }
 
 /// Fixed display order for pinnable summary rows, per user preference —
@@ -616,47 +634,66 @@ impl AppDelegate {
             return;
         };
         let hot = self.ivars().hot_sensors.borrow();
-        let pinned: Vec<&str> = descriptors
-            .iter()
-            .filter(|d| hot.contains(d.key))
-            .map(|d| d.formatted.as_str())
-            .collect();
+        let pinned: Vec<&SensorDescriptor> = descriptors.iter().filter(|d| hot.contains(d.key)).collect();
         if pinned.is_empty() {
             // Default fallback when nothing is pinned — the gauge icon
             // (set once at launch) stays visible either way.
             button.setTitle(ns_string!("Pantau"));
         } else {
+            // Icon + bare value per pin (vitals-gnome style — "[cpu] 9%"
+            // instead of "CPU: 9%") via NSAttributedString/NSTextAttachment,
+            // since a plain NSButton title can't mix images and text.
+            // `formatted` strings are consistently "Label: value" — split
+            // once to drop the now-redundant label the icon already conveys.
+            let value_only = |d: &SensorDescriptor| -> String {
+                d.formatted.split_once(": ").map(|(_, v)| v.to_string()).unwrap_or_else(|| d.formatted.clone())
+            };
+            let plain_attr = |s: &str| -> Retained<NSAttributedString> {
+                NSAttributedString::initWithString(NSAttributedString::alloc(), &NSString::from_str(s))
+            };
+
             // Hard character-length cap (not just an item-count cap) — an
             // unbounded-width button title makes macOS's menu-bar-overflow
             // logic evict this status item entirely (it vanishes from the
             // tray) once other menu bar items are already crowding the
-            // available space. Individual formatted values vary a lot in
-            // length, so capping by item count alone (previously 3) wasn't
-            // enough on a crowded bar — a per-pin char budget bounds total
-            // width regardless of how many/how long the pins are. All pins
-            // still count as hot/toggled; only the on-screen text shrinks.
-            const MAX_TITLE_CHARS: usize = 16;
-            let mut text = String::new();
-            let mut shown = 0;
-            for value in &pinned {
-                let candidate = if text.is_empty() { value.to_string() } else { format!("{text}  {value}") };
-                if candidate.chars().count() > MAX_TITLE_CHARS && shown > 0 {
+            // available space. Individual values vary a lot in length, so
+            // capping by item count alone wasn't enough on a crowded bar —
+            // a char budget on the text portion bounds total width
+            // regardless of how many/how long the pins are (each icon
+            // attachment counts as roughly one character's width too, but
+            // isn't included in the count — close enough for a soft cap).
+            // All pins still count as hot/toggled; only the shown count
+            // shrinks.
+            const MAX_TITLE_CHARS: usize = 24;
+            let mut shown_len = 0usize;
+            let mut shown = 0usize;
+            for d in &pinned {
+                let v = value_only(d);
+                let extra = if shown == 0 { v.chars().count() } else { v.chars().count() + 2 };
+                if shown_len + extra > MAX_TITLE_CHARS && shown > 0 {
                     break;
                 }
-                text = candidate;
+                shown_len += extra;
                 shown += 1;
             }
-            let text = if shown < pinned.len() {
-                format!("{text} +{}", pinned.len() - shown)
-            } else {
-                text
-            };
-            // Right-pad to the same cap every tick — combined with the
-            // width-padded FormatKind::Percent digits, this keeps the
-            // status item's on-screen width constant instead of growing
-            // and shrinking with every refresh as values change digit
-            // count (e.g. "9%" -> "10%").
-            button.setTitle(&NSString::from_str(&format!("{text:<MAX_TITLE_CHARS$}")));
+
+            let title = NSMutableAttributedString::new();
+            for (i, d) in pinned.iter().take(shown).enumerate() {
+                if i > 0 {
+                    title.appendAttributedString(&plain_attr("  "));
+                }
+                if let Some(symbol) = sensor_icon_name(d.key) {
+                    if let Some(icon_str) = icon_attachment_string(symbol) {
+                        title.appendAttributedString(&icon_str);
+                        title.appendAttributedString(&plain_attr(" "));
+                    }
+                }
+                title.appendAttributedString(&plain_attr(&value_only(d)));
+            }
+            if shown < pinned.len() {
+                title.appendAttributedString(&plain_attr(&format!(" +{}", pinned.len() - shown)));
+            }
+            button.setAttributedTitle(&title);
         }
     }
 
