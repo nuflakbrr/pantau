@@ -15,6 +15,8 @@ use core_foundation_sys::string::{
 use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_void;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
@@ -90,11 +92,12 @@ pub struct BatteryReading {
     pub power_source_state: Option<String>,
     pub percentage: Option<f64>,
     pub cycle_count: Option<i64>,
-    /// `Max Capacity`/`Current Capacity` from this API are normalized to a
-    /// 0-100 scale on macOS 12+ (Apple stopped exposing raw mAh here for
-    /// privacy) — this is percentage-of-design, not the raw-capacity ratio
-    /// vitals-gnome reads from Linux `/sys/class/power_supply`. Best-effort,
-    /// `None` if the key isn't present on this OS version.
+    /// Always `None` from [`read_battery`] — real health is sourced
+    /// separately from [`BatteryHealthWatcher`] (background `system_profiler`
+    /// call, too slow to run on every 1s poll tick) and merged in by the
+    /// caller. IORegistry's raw `AppleRawMaxCapacity`/`DesignCapacity` ratio
+    /// was tried first but doesn't match System Settings' number (Apple
+    /// applies further calibration `system_profiler` already accounts for).
     pub health_percent: Option<f64>,
     /// mV — often absent on modern macOS (same privacy restriction), `None`
     /// rather than a fabricated value.
@@ -166,7 +169,7 @@ pub fn read_battery() -> BatteryReading {
             power_source_state: dict_get_string(desc, "Power Source State"),
             percentage,
             cycle_count: dict_get_i64(desc, "Cycle Count"),
-            health_percent: max.map(|m| m as f64),
+            health_percent: None,
             voltage_mv: dict_get_i64(desc, "Voltage"),
             power_rate_ma,
             raw_time_left_minutes,
@@ -209,6 +212,100 @@ impl TimeLeftEstimator {
             self.samples.pop_front();
         }
         Some(self.samples.iter().sum::<f64>() / self.samples.len() as f64)
+    }
+}
+
+/// IOKit's own remaining-time estimate only changes every few minutes (the
+/// OS recalculates it periodically off discharge rate, not every poll
+/// tick — confirmed by direct observation: the raw value held flat across
+/// 5 consecutive 1s ticks on real hardware). Wrapping `TimeLeftEstimator`'s
+/// output here counts the *displayed* number down by real elapsed time
+/// between those OS updates instead of freezing, so the panel still visibly
+/// ticks every second like a countdown — the same illusion vitals-gnome and
+/// most menu bar apps use, since no OS API actually provides a
+/// per-second-accurate remaining-time figure.
+#[derive(Debug, Default)]
+pub struct TimeLeftDisplay {
+    last_source_minutes: Option<f64>,
+    displayed_minutes: Option<f64>,
+    last_tick: Option<Instant>,
+}
+
+impl TimeLeftDisplay {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `source_minutes` is this tick's freshly-averaged estimate from
+    /// [`TimeLeftEstimator::push`].
+    pub fn tick(&mut self, source_minutes: Option<f64>) -> Option<f64> {
+        let Some(src) = source_minutes else {
+            *self = Self::default();
+            return None;
+        };
+        let now = Instant::now();
+        let is_new_sample = self.last_source_minutes != Some(src);
+        self.displayed_minutes = if is_new_sample || self.displayed_minutes.is_none() {
+            Some(src)
+        } else {
+            let elapsed_minutes = self.last_tick.map(|t| now.duration_since(t).as_secs_f64() / 60.0).unwrap_or(0.0);
+            Some((self.displayed_minutes.unwrap_or(src) - elapsed_minutes).max(0.0))
+        };
+        self.last_source_minutes = Some(src);
+        self.last_tick = Some(now);
+        self.displayed_minutes
+    }
+}
+
+/// Parses `system_profiler SPPowerDataType`'s "Maximum Capacity: NN%" line
+/// — the same figure System Settings > Battery shows, since it's the same
+/// underlying data source. Not available from any public IOKit API found
+/// (`AppleRawMaxCapacity`/`DesignCapacity` gives a close but different
+/// number — Apple applies further calibration this command already
+/// includes). Takes noticeably longer than a syscall (spawns a process),
+/// so this is only ever called from a background thread.
+fn read_health_from_system_profiler() -> Option<f64> {
+    let output = std::process::Command::new("system_profiler").arg("SPPowerDataType").output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().find_map(|l| l.trim().strip_prefix("Maximum Capacity:"))?;
+    line.trim().trim_end_matches('%').parse::<f64>().ok()
+}
+
+/// Background-thread poller for [`read_health_from_system_profiler`],
+/// same non-blocking channel pattern as `public_ip::PublicIpWatcher` —
+/// battery health changes on the order of days/weeks, not seconds, so a
+/// long refresh interval is intentional, not a corner cut.
+#[derive(Default)]
+pub struct BatteryHealthWatcher {
+    receiver: Option<mpsc::Receiver<Option<f64>>>,
+    last_fetch: Option<Instant>,
+    latest: Option<f64>,
+}
+
+impl BatteryHealthWatcher {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn poll(&mut self) -> Option<f64> {
+        if let Some(rx) = &self.receiver {
+            if let Ok(result) = rx.try_recv() {
+                if result.is_some() {
+                    self.latest = result;
+                }
+                self.receiver = None;
+            }
+        }
+        let due = self.last_fetch.map(|t| t.elapsed() >= Duration::from_secs(600)).unwrap_or(true);
+        if due && self.receiver.is_none() {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(read_health_from_system_profiler());
+            });
+            self.receiver = Some(rx);
+            self.last_fetch = Some(Instant::now());
+        }
+        self.latest
     }
 }
 

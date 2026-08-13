@@ -155,6 +155,8 @@ struct AppDelegateIvars {
     timer: RefCell<Option<Retained<NSTimer>>>,
     network_accumulator: RefCell<NetworkAccumulator>,
     battery_time_left: RefCell<TimeLeftEstimator>,
+    battery_time_left_display: RefCell<battery::TimeLeftDisplay>,
+    battery_health: RefCell<battery::BatteryHealthWatcher>,
     public_ip_watcher: RefCell<PublicIpWatcher>,
     /// `None` if `AppleSMC` couldn't be opened at all (should not happen on
     /// real Mac hardware, but never assume) — thermal rows are simply
@@ -316,6 +318,8 @@ impl AppDelegate {
             timer: RefCell::new(None),
             network_accumulator: RefCell::new(NetworkAccumulator::new()),
             battery_time_left: RefCell::new(TimeLeftEstimator::new()),
+            battery_time_left_display: RefCell::new(battery::TimeLeftDisplay::new()),
+            battery_health: RefCell::new(battery::BatteryHealthWatcher::new()),
             public_ip_watcher: RefCell::new(PublicIpWatcher::new()),
             smc: OnceCell::new(),
             thermal_probe: OnceCell::new(),
@@ -384,13 +388,16 @@ impl AppDelegate {
         let network_readings = self.ivars().network_accumulator.borrow_mut().sample();
         let network_agg = network::aggregate(&network_readings);
         let wifi_reading = wifi::read_wifi();
-        let battery_reading = battery::read_battery();
-        let battery_time_left_minutes = battery_reading.is_charging.and_then(|charging| {
+        let mut battery_reading = battery::read_battery();
+        battery_reading.health_percent = self.ivars().battery_health.borrow_mut().poll();
+        let battery_time_left_source = battery_reading.is_charging.and_then(|charging| {
             self.ivars()
                 .battery_time_left
                 .borrow_mut()
                 .push(charging, battery_reading.raw_time_left_minutes)
         });
+        let battery_time_left_minutes =
+            self.ivars().battery_time_left_display.borrow_mut().tick(battery_time_left_source);
         let thermal_reading = match (self.ivars().smc.get().and_then(|s| s.as_ref()), self.ivars().thermal_probe.get())
         {
             (Some(conn), Some(probe)) => Some(thermal::read(conn, probe)),
@@ -664,7 +671,7 @@ impl AppDelegate {
             // isn't included in the count — close enough for a soft cap).
             // All pins still count as hot/toggled; only the shown count
             // shrinks.
-            const MAX_TITLE_CHARS: usize = 24;
+            const MAX_TITLE_CHARS: usize = 36;
             let mut shown_len = 0usize;
             let mut shown = 0usize;
             for d in &pinned {
