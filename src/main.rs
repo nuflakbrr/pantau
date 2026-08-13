@@ -605,7 +605,7 @@ impl AppDelegate {
             // enough on a crowded bar — a per-pin char budget bounds total
             // width regardless of how many/how long the pins are. All pins
             // still count as hot/toggled; only the on-screen text shrinks.
-            const MAX_TITLE_CHARS: usize = 28;
+            const MAX_TITLE_CHARS: usize = 16;
             let mut text = String::new();
             let mut shown = 0;
             for value in &pinned {
@@ -900,6 +900,8 @@ impl AppDelegate {
         // hardware has every sensor available from tick one, so this
         // doesn't bite in practice).
         if !self.ivars().menu_structure_built.get() {
+            menu.addItem(&objc2_app_kit::NSMenuItem::separatorItem(mtm));
+
             for (name, submenu) in CATEGORY_NAMES.iter().zip(categories.iter()) {
                 if submenu.numberOfItems() == 0 {
                     continue;
