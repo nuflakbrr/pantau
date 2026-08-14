@@ -109,7 +109,11 @@ pub fn download_and_install(download_url: &str) -> Result<(), String> {
     std::fs::rename(&extracted_app, target).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
-    std::process::Command::new("open").arg(target).spawn().map_err(|e| e.to_string())?;
+    // `-n` forces a fresh instance — plain `open` on an already-running app
+    // (this very process, mid-exit) just re-activates the old one instead
+    // of launching the freshly-installed binary, so nothing survives once
+    // the caller exits this process.
+    std::process::Command::new("open").args(["-n"]).arg(target).spawn().map_err(|e| e.to_string())?;
     Ok(())
 }
 

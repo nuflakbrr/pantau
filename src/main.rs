@@ -409,14 +409,12 @@ impl AppDelegate {
                 if response == objc2_app_kit::NSAlertFirstButtonReturn {
                     let (tx, rx) = std::sync::mpsc::channel();
                     std::thread::spawn(move || {
+                        // The freshly-installed copy is already launched at
+                        // this point on success (see `download_and_install`)
+                        // — always report back to the main thread so it can
+                        // show a confirmation alert before this instance
+                        // exits, instead of exiting silently mid-download-thread.
                         let outcome = updater::download_and_install(&download_url);
-                        if outcome.is_ok() {
-                            // The freshly-installed copy is already
-                            // launched at this point (see
-                            // `download_and_install`) — a hard exit here
-                            // is the intended handoff, not an error path.
-                            std::process::exit(0);
-                        }
                         let _ = tx.send(outcome);
                     });
                     *self.ivars().update_install.borrow_mut() = Some(rx);
@@ -430,20 +428,32 @@ impl AppDelegate {
             let rx = self.ivars().update_install.borrow();
             rx.as_ref().and_then(|rx| rx.try_recv().ok())
         };
-        let Some(Err(e)) = result else {
-            if result.is_some() {
-                *self.ivars().update_install.borrow_mut() = None;
-            }
+        let Some(outcome) = result else {
             return;
         };
         *self.ivars().update_install.borrow_mut() = None;
         let mtm = self.mtm();
         let alert = NSAlert::new(mtm);
-        alert.setAlertStyle(NSAlertStyle::Warning);
-        alert.setMessageText(&NSString::from_str("Update install failed"));
-        alert.setInformativeText(&NSString::from_str(&e));
-        alert.addButtonWithTitle(&NSString::from_str("OK"));
-        alert.runModal();
+        match outcome {
+            Ok(()) => {
+                alert.setMessageText(&NSString::from_str("Update installed"));
+                alert.setInformativeText(&NSString::from_str(
+                    "Pantau was updated successfully. Restarting into the new version now.",
+                ));
+                alert.addButtonWithTitle(&NSString::from_str("OK"));
+                alert.runModal();
+                // The freshly-installed copy is already launched (see
+                // `download_and_install`) — this exit hands off to it.
+                std::process::exit(0);
+            }
+            Err(e) => {
+                alert.setAlertStyle(NSAlertStyle::Warning);
+                alert.setMessageText(&NSString::from_str("Update install failed"));
+                alert.setInformativeText(&NSString::from_str(&e));
+                alert.addButtonWithTitle(&NSString::from_str("OK"));
+                alert.runModal();
+            }
+        }
     }
 
     fn schedule_timer(&self) {
