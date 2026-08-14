@@ -9,7 +9,7 @@ use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
-    NSAttributedStringAttachmentConveniences, NSControlStateValueOff, NSControlStateValueOn, NSFont,
+    NSAttributedStringAttachmentConveniences, NSControlStateValueOff, NSFont,
     NSFontWeightRegular, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem, NSTextAttachment,
     NSVariableStatusItemLength,
 };
@@ -69,20 +69,6 @@ fn category_icon_name(category_name: &str) -> Option<&'static str> {
     }
 }
 
-fn set_menu_item_icon(item: &NSMenuItem, symbol: Option<&'static str>) {
-    let Some(symbol) = symbol else { return };
-    if let Some(icon) = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(symbol), None)
-    {
-        icon.setTemplate(true);
-        // SF Symbol images come back at their natural glyph size, which
-        // can be larger than a menu row's fixed height and get clipped
-        // into invisibility — pin it to the standard small menu-item icon
-        // size instead of trusting auto-scaling.
-        icon.setSize(objc2_foundation::NSSize { width: 16.0, height: 16.0 });
-        item.setImage(Some(&icon));
-    }
-}
-
 /// Shows/hides the status bar's gauge glyph — hidden once pins are shown
 /// (their own icons + values already fill the space) so the fixed-width
 /// gauge doesn't eat into the tray's tight character budget.
@@ -100,15 +86,63 @@ fn set_status_gauge_icon(button: &objc2_app_kit::NSButton, show: bool) {
 
 /// SF Symbol rendered as an inline `NSAttributedString` fragment (one
 /// `NSTextAttachment` character) — for embedding an icon glyph directly
-/// inside a plain-text button title, vitals-gnome style (icon + value, no
-/// text label), since `NSButton` titles otherwise can't mix images and text.
+/// inside a button or menu item title so it stays perfectly aligned.
 fn icon_attachment_string(symbol: &str) -> Option<Retained<NSAttributedString>> {
     let icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(symbol), None)?;
     icon.setTemplate(true);
-    icon.setSize(objc2_foundation::NSSize { width: 13.0, height: 13.0 });
+    icon.setSize(objc2_foundation::NSSize { width: 14.0, height: 14.0 });
     let attachment = NSTextAttachment::new();
     attachment.setImage(Some(&icon));
     Some(NSAttributedString::attributedStringWithAttachment(&attachment))
+}
+
+fn checkmark_attachment_string(checked: bool) -> Retained<NSAttributedString> {
+    let size = objc2_foundation::NSSize { width: 14.0, height: 14.0 };
+    let icon = if checked {
+        if let Some(img) = NSImage::imageWithSystemSymbolName_accessibilityDescription(ns_string!("checkmark"), None) {
+            img.setTemplate(true);
+            img.setSize(size);
+            img
+        } else {
+            NSImage::initWithSize(NSImage::alloc(), size)
+        }
+    } else {
+        NSImage::initWithSize(NSImage::alloc(), size)
+    };
+    let attachment = NSTextAttachment::new();
+    attachment.setImage(Some(&icon));
+    NSAttributedString::attributedStringWithAttachment(&attachment)
+}
+
+fn menu_attributed_title(checked: Option<bool>, symbol: Option<&str>, text: &str) -> Retained<NSAttributedString> {
+    let title = NSMutableAttributedString::new();
+    let space = || {
+        NSAttributedString::initWithString(
+            NSAttributedString::alloc(),
+            ns_string!("  "),
+        )
+    };
+
+    if let Some(is_checked) = checked {
+        title.appendAttributedString(&checkmark_attachment_string(is_checked));
+        title.appendAttributedString(&space());
+    } else {
+        title.appendAttributedString(&checkmark_attachment_string(false));
+        title.appendAttributedString(&space());
+    }
+
+    if let Some(sym) = symbol {
+        if let Some(icon_str) = icon_attachment_string(sym) {
+            title.appendAttributedString(&icon_str);
+            title.appendAttributedString(&space());
+        }
+    }
+
+    title.appendAttributedString(&NSAttributedString::initWithString(
+        NSAttributedString::alloc(),
+        &NSString::from_str(text),
+    ));
+    title.into_super()
 }
 
 /// Fixed display order for pinnable summary rows, per user preference.
@@ -256,12 +290,20 @@ define_class!(
 
     unsafe impl NSMenuDelegate for AppDelegate {
         #[unsafe(method(menuWillOpen:))]
-        fn menu_will_open(&self, _menu: &NSMenu) {
+        fn menu_will_open(&self, menu: &NSMenu) {
             // Pinned rows and category submenu contents both update in
             // place every timer tick regardless of open/closed state (see
             // `rebuild_menu`), so opening just needs a fresh immediate poll.
             self.schedule_timer();
             self.poll_tick_impl(true);
+            if let Some(status_item) = self.ivars().status_item.get() {
+                if let Some(button) = status_item.button(self.mtm()) {
+                    if let Some(win) = button.window() {
+                        win.layoutIfNeeded();
+                    }
+                    menu.setMinimumWidth(button.frame().size.width + 8.0);
+                }
+            }
         }
     }
 
@@ -807,6 +849,13 @@ impl AppDelegate {
             }
             button.setAttributedTitle(&title);
         }
+        if let Some(win) = button.window() {
+            win.layoutIfNeeded();
+        }
+        let bar_width = button.frame().size.width + 8.0;
+        if let Some(menu) = self.ivars().menu.get() {
+            menu.setMinimumWidth(bar_width);
+        }
     }
 
     fn rebuild_menu(
@@ -830,6 +879,15 @@ impl AppDelegate {
         };
         let mtm = self.mtm();
 
+        if let Some(status_item) = self.ivars().status_item.get() {
+            if let Some(button) = status_item.button(mtm) {
+                if let Some(win) = button.window() {
+                    win.layoutIfNeeded();
+                }
+                menu.setMinimumWidth(button.frame().size.width + 8.0);
+            }
+        }
+
         let hot = self.ivars().hot_sensors.borrow().clone();
 
         let settings = self.ivars().settings.borrow();
@@ -851,23 +909,23 @@ impl AppDelegate {
         {
             let mut rows = self.ivars().pinned_row_items.borrow_mut();
             for (i, descriptor) in visible.iter().enumerate() {
-                let state = if hot.contains(descriptor.key) { NSControlStateValueOn } else { NSControlStateValueOff };
+                let is_pinned = hot.contains(descriptor.key);
+                let title = menu_attributed_title(Some(is_pinned), sensor_icon_name(descriptor.key), &descriptor.formatted);
                 if let Some(item) = rows.get(i) {
-                    item.setTitle(&NSString::from_str(&descriptor.formatted));
+                    item.setAttributedTitle(Some(&title));
                     unsafe { item.setRepresentedObject(Some(&NSString::from_str(descriptor.key))) };
-                    item.setState(state);
+                    item.setState(NSControlStateValueOff);
                     item.setEnabled(descriptor.enabled);
                 } else {
                     let item = NSMenuItem::new(mtm);
-                    item.setTitle(&NSString::from_str(&descriptor.formatted));
+                    item.setAttributedTitle(Some(&title));
                     unsafe {
                         item.setTarget(Some(self));
                         item.setAction(Some(sel!(pinToggle:)));
                         item.setRepresentedObject(Some(&NSString::from_str(descriptor.key)));
                     }
-                    item.setState(state);
+                    item.setState(NSControlStateValueOff);
                     item.setEnabled(descriptor.enabled);
-                    set_menu_item_icon(&item, sensor_icon_name(descriptor.key));
                     menu.insertItem_atIndex(&item, i as isize);
                     rows.push(item);
                 }
@@ -1089,8 +1147,8 @@ impl AppDelegate {
                 }
                 submenu.setDelegate(Some(ProtocolObject::from_ref(self)));
                 let item = NSMenuItem::new(mtm);
-                item.setTitle(&NSString::from_str(name));
-                set_menu_item_icon(&item, category_icon_name(name));
+                let title = menu_attributed_title(None, category_icon_name(name), name);
+                item.setAttributedTitle(Some(&title));
                 item.setSubmenu(Some(submenu));
                 menu.addItem(&item);
             }
