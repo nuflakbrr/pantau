@@ -111,8 +111,7 @@ fn icon_attachment_string(symbol: &str) -> Option<Retained<NSAttributedString>> 
     Some(NSAttributedString::attributedStringWithAttachment(&attachment))
 }
 
-/// Fixed display order for pinnable summary rows, per user preference —
-/// overridden by alphabetical sort when `settings.alphabetize` is on.
+/// Fixed display order for pinnable summary rows, per user preference.
 /// Unlisted keys (e.g. `uptime`) sort just after Storage, their natural
 /// spot, rather than vanishing from the ordering.
 fn panel_order(key: &str) -> u8 {
@@ -147,7 +146,6 @@ const CATEGORY_NAMES: [&str; 7] = ["CPU", "Memory", "System", "Storage", "Networ
 /// its formatted value onto the status bar panel text.
 struct SensorDescriptor {
     key: &'static str,
-    label: &'static str,
     raw_value: f64,
     formatted: String,
     /// False when this tick's read failed but a last-known value from a
@@ -229,9 +227,7 @@ define_class!(
             let item = bar.statusItemWithLength(NSVariableStatusItemLength);
             if let Some(button) = item.button(mtm) {
                 button.setTitle(ns_string!("Pantau"));
-                if !self.ivars().settings.borrow().hide_icons {
-                    set_status_gauge_icon(&button, true);
-                }
+                set_status_gauge_icon(&button, true);
                 if self.ivars().settings.borrow().fixed_widths {
                     let font = NSFont::monospacedDigitSystemFontOfSize_weight(
                         NSFont::systemFontSize(),
@@ -378,6 +374,12 @@ impl AppDelegate {
         *self.ivars().update_check.borrow_mut() = None;
 
         let mtm = self.mtm();
+        // This is an LSUIElement (menu-bar-only, no Dock icon) app — macOS
+        // doesn't bring an unactivated background app's windows to front,
+        // so without this, an alert triggered from a background poll (like
+        // this one, or the install-result one below) can render behind
+        // whatever app currently has focus and go unnoticed entirely.
+        NSApplication::sharedApplication(mtm).activate();
         let alert = NSAlert::new(mtm);
         match result {
             updater::UpdateCheckResult::UpToDate => {
@@ -433,6 +435,7 @@ impl AppDelegate {
         };
         *self.ivars().update_install.borrow_mut() = None;
         let mtm = self.mtm();
+        NSApplication::sharedApplication(mtm).activate();
         let alert = NSAlert::new(mtm);
         match outcome {
             Ok(()) => {
@@ -565,7 +568,6 @@ impl AppDelegate {
         if let Some(cpu) = &cpu_reading {
             descriptors.push(SensorDescriptor {
                 key: "cpu_total",
-                label: "CPU",
                 raw_value: cpu.aggregate_percent,
                 formatted: format!("CPU: {}", FormatKind::Percent.format(cpu.aggregate_percent, opts)),
             enabled: true,
@@ -574,7 +576,6 @@ impl AppDelegate {
         if let Some(v) = memory_reading.usage_percent {
             descriptors.push(SensorDescriptor {
                 key: "mem_usage",
-                label: "Memory",
                 raw_value: v,
                 formatted: format!("Memory: {}", FormatKind::Percent.format(v, opts)),
             enabled: true,
@@ -583,7 +584,6 @@ impl AppDelegate {
         if let Some(v) = swap_reading.usage_percent {
             descriptors.push(SensorDescriptor {
                 key: "swap_usage",
-                label: "Swap",
                 raw_value: v,
                 formatted: format!("Swap: {}", FormatKind::Percent.format(v, opts)),
             enabled: true,
@@ -592,7 +592,6 @@ impl AppDelegate {
         if let Some(v) = disk_reading.used_percent {
             descriptors.push(SensorDescriptor {
                 key: "disk_usage",
-                label: "Storage",
                 raw_value: v,
                 formatted: format!("Storage: {}", FormatKind::Percent.format(v, opts)),
             enabled: true,
@@ -601,7 +600,6 @@ impl AppDelegate {
         if let Some(v) = system_reading.uptime_seconds {
             descriptors.push(SensorDescriptor {
                 key: "uptime",
-                label: "Uptime",
                 raw_value: v,
                 formatted: format!("Uptime: {}", FormatKind::Runtime.format(v, opts)),
             enabled: true,
@@ -609,7 +607,6 @@ impl AppDelegate {
         }
         descriptors.push(SensorDescriptor {
             key: "net_down",
-            label: "Network Down",
             raw_value: network_agg.rx_bytes_per_sec,
             formatted: format!(
                 "Down: {}/s",
@@ -619,7 +616,6 @@ impl AppDelegate {
     });
         descriptors.push(SensorDescriptor {
             key: "net_up",
-            label: "Network Up",
             raw_value: network_agg.tx_bytes_per_sec,
             formatted: format!(
                 "Up: {}/s",
@@ -630,7 +626,6 @@ impl AppDelegate {
         if let Some(v) = wifi_reading.link_quality_percent {
             descriptors.push(SensorDescriptor {
                 key: "wifi_quality",
-                label: "WiFi",
                 raw_value: v,
                 formatted: format!("WiFi: {}", FormatKind::Percent.format(v, opts)),
             enabled: true,
@@ -648,7 +643,6 @@ impl AppDelegate {
             };
             descriptors.push(SensorDescriptor {
                 key: "cpu_temp",
-                label: "CPU Temp",
                 // Dedupe stays in Celsius regardless of display unit — only
                 // the formatted text converts.
                 raw_value: celsius,
@@ -665,7 +659,6 @@ impl AppDelegate {
                 if let Some((rpm, enabled)) = resolve(key, fan.actual_rpm) {
                     descriptors.push(SensorDescriptor {
                         key,
-                        label: "Fan",
                         raw_value: rpm,
                         formatted: format!("Fan {}: {:.0} RPM", fan.index, rpm),
                         enabled,
@@ -676,7 +669,6 @@ impl AppDelegate {
         if let Some((volts, enabled)) = resolve("voltage_avg", thermal_reading.as_ref().and_then(|t| t.voltage_avg)) {
             descriptors.push(SensorDescriptor {
                 key: "voltage_avg",
-                label: "Voltage",
                 raw_value: volts,
                 formatted: format!("Voltage: {volts:.3} V"),
                 enabled,
@@ -685,7 +677,6 @@ impl AppDelegate {
         if let Some(hz) = display_hz {
             descriptors.push(SensorDescriptor {
                 key: "display_hz",
-                label: "Display",
                 raw_value: hz,
                 formatted: format!("Display: {}", FormatKind::Hertz.format(hz, opts)),
                 enabled: true,
@@ -705,7 +696,6 @@ impl AppDelegate {
             let hash = reading.ip.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
             descriptors.push(SensorDescriptor {
                 key: "public_ip",
-                label: "Public IP",
                 raw_value: hash as f64,
                 formatted: format!("Public IP: {flag}{}", reading.ip),
                 enabled: true,
@@ -758,9 +748,7 @@ impl AppDelegate {
         let hot = self.ivars().hot_sensors.borrow();
         let pinned: Vec<&SensorDescriptor> = descriptors.iter().filter(|d| hot.contains(d.key)).collect();
         if pinned.is_empty() {
-            if !self.ivars().settings.borrow().hide_icons {
-                set_status_gauge_icon(&button, true);
-            }
+            set_status_gauge_icon(&button, true);
             button.setTitle(ns_string!("Pantau"));
         } else {
             set_status_gauge_icon(&button, false);
@@ -846,18 +834,11 @@ impl AppDelegate {
 
         let settings = self.ivars().settings.borrow();
         // Pinnable summary rows: hide-zero, except Fan — 0 RPM is a
-        // valid idle reading, not noise, per the interaction-model
-        // spec. Then alphabetize by label if enabled. Plain string
-        // sort, not locale numeric-natural compare — good enough while
-        // every label here is unique text, revisit if a numbered label
-        // shows up.
-        let mut visible: Vec<&SensorDescriptor> = descriptors
+        // valid idle reading, not noise, per the interaction-model spec.
+        let visible: Vec<&SensorDescriptor> = descriptors
             .iter()
             .filter(|d| !settings.hide_zeros || d.raw_value != 0.0 || d.key.starts_with("fan_"))
             .collect();
-        if settings.alphabetize {
-            visible.sort_by(|a, b| a.label.cmp(b.label));
-        }
         drop(settings);
 
         // Pinned rows are updated in place (`setTitle`/`setState` on
@@ -919,6 +900,11 @@ impl AppDelegate {
             } else {
                 let item = NSMenuItem::new(mtm);
                 item.setTitle(&NSString::from_str(&title));
+                // Plain NSMenuItem defaults to enabled — with no
+                // target/action these rows already do nothing on click,
+                // but stayed highlightable/clickable-looking on hover.
+                // These are info rows, not actions: disable to match.
+                item.setEnabled(false);
                 categories[category].addItem(&item);
                 rows[category].push(item);
             }

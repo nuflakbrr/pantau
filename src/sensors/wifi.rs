@@ -36,6 +36,15 @@ pub fn read_wifi() -> WifiReading {
         let Some(iface) = iface else {
             return WifiReading::default();
         };
+
+        // rssiValue/noiseMeasurement can hold onto the last-associated
+        // reading even after the radio is turned off in System Settings —
+        // powerOn is the actual "is Wi-Fi on" signal, not rssi == 0 alone.
+        let power_on: bool = msg_send![&*iface, powerOn];
+        if !power_on {
+            return WifiReading::default();
+        }
+
         let rssi: i64 = msg_send![&*iface, rssiValue];
         let noise: i64 = msg_send![&*iface, noiseMeasurement];
 

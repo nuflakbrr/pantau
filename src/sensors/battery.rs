@@ -85,6 +85,11 @@ unsafe fn dict_get_string(dict: CFDictionaryRef, key: &str) -> Option<String> {
     }
 }
 
+// is_present/power_source_state/percentage are populated from real
+// IOPSGetPowerSourceDescription data but no display path reads them yet
+// (the menu's percentage row uses a different field) — kept for a future
+// consumer rather than deleted.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct BatteryReading {
     pub is_present: Option<bool>,

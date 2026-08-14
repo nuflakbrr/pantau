@@ -82,7 +82,6 @@ pub struct Settings {
     pub update_time: u32,
     pub position_in_panel: PanelPosition,
     pub use_higher_precision: bool,
-    pub alphabetize: bool,
     pub hide_zeros: bool,
     pub show_temperature: bool,
     pub show_voltage: bool,
@@ -106,7 +105,6 @@ pub struct Settings {
     pub storage_measurement: SizeUnit,
     pub battery_slot: u32,
     pub fixed_widths: bool,
-    pub hide_icons: bool,
     /// No-op on macOS — AppKit auto-attaches `NSMenu` to the click point,
     /// there's no separate "centered" mode like GNOME Shell's panel menu.
     /// Kept for settings-struct compatibility, shown as "not applicable on

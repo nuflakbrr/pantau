@@ -1,5 +1,9 @@
 use std::ffi::CString;
 
+// free_bytes/free_percent/reserved_bytes are real statfs-derived data with
+// no display consumer yet (the menu shows used/total only) — kept for a
+// future consumer rather than deleted.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct DiskReading {
     pub total_bytes: Option<u64>,
@@ -53,19 +57,3 @@ pub fn read_usage(path: &str) -> DiskReading {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DiskIoReading {
-    pub read_bytes_total: Option<u64>,
-    pub write_bytes_total: Option<u64>,
-}
-
-// ponytail: IOBlockStorageDriver read/write throughput needs walking the
-// IOKit registry (IOServiceGetMatchingService + IORegistryEntryCreateCFProperties)
-// and parsing a nested CFDictionary "Statistics" entry — real risk surface
-// for a first pass with no interactive hardware iteration budget left this
-// session. Returns None (graceful degradation, same contract as every other
-// probe in this codebase) until that's implemented with `io-kit-sys` +
-// `core-foundation`.
-pub fn read_io() -> DiskIoReading {
-    DiskIoReading::default()
-}

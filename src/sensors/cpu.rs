@@ -2,6 +2,9 @@ use super::sys::{self, CpuTicks};
 use super::{aggregate_group, GroupStats};
 
 /// Static CPU info, read once — brand/core-count/cache never change at runtime.
+// l1i_cache_bytes/macos_version are real sysctl reads with no display
+// consumer yet — kept for a future consumer rather than deleted.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct CpuStaticInfo {
     pub brand: Option<String>,

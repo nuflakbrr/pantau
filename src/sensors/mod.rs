@@ -14,6 +14,11 @@ pub mod wifi;
 
 use std::collections::HashMap;
 
+// Processor/Memory are only constructed in this module's own tests today —
+// `main.rs` tags every row `SensorGroup::System` regardless of real
+// category. Kept (not deleted) since `SensorId` is meant to categorize by
+// real group; narrowing the enum would be a design change, not a cleanup.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SensorGroup {
     Processor,

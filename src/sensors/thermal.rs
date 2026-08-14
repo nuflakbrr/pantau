@@ -86,6 +86,9 @@ impl ThermalProbe {
     }
 }
 
+// min_rpm/max_rpm are real SMC-read values with no display consumer yet
+// (the menu shows actual_rpm only) — kept rather than deleted.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FanReading {
     pub index: u32,
@@ -94,6 +97,9 @@ pub struct FanReading {
     pub max_rpm: Option<f64>,
 }
 
+// gpu_temp is a real SMC-read value with no display consumer yet — kept
+// rather than deleted.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct ThermalReading {
     pub cpu_temp_stats: Option<GroupStats>,

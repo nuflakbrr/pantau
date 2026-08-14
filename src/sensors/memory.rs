@@ -4,6 +4,9 @@ fn page_size_bytes() -> u64 {
     unsafe { libc::sysconf(libc::_SC_PAGESIZE) as u64 }
 }
 
+// allocated_bytes is a real computed value with no display consumer yet
+// (the menu uses usage_percent) — kept rather than deleted.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct MemoryReading {
     pub physical_bytes: Option<u64>,
@@ -57,6 +60,9 @@ struct XswUsage {
     encrypted: i32,
 }
 
+// free_bytes is a real computed value with no display consumer yet (the
+// menu uses usage_percent) — kept rather than deleted.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct SwapReading {
     pub total_bytes: Option<u64>,

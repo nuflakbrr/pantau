@@ -18,6 +18,10 @@
 //! NVIDIA (`nvidia-smi` subprocess in vitals-gnome) is dropped entirely —
 //! no NVIDIA driver support on any current macOS.
 
+// vram fields are reserved for the documented-but-unimplemented
+// IORegistry AGXAccelerator walk (see module doc comment) — currently
+// always None, no display consumer, kept rather than deleted.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct GpuReading {
     /// `None` on Apple Silicon (no public API) — always `None` on every Mac
@@ -27,6 +31,7 @@ pub struct GpuReading {
     pub vram_total_bytes: Option<u64>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct GpuStaticInfo {
     pub model_name: Option<String>,

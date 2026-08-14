@@ -3,41 +3,35 @@
 //! - Sidebar nav uses `NSSegmentedControl` instead of `NSSplitViewController`
 //!   + `NSTableView` — same category-to-detail-pane behavior, far less
 //!   ceremony (no `NSTableViewDataSource`/`Delegate` conformance needed).
-//! - All 6 panes live in this one file as builder functions instead of 6
+//! - All 5 panes live in this one file as builder functions instead of 5
 //!   separate `NSViewController` subclasses — Rust modules don't need
 //!   Swift/ObjC's one-controller-per-file convention, and a real
-//!   `NSViewController` per pane would 6x the `define_class!` boilerplate
+//!   `NSViewController` per pane would 5x the `define_class!` boilerplate
 //!   for no behavioral gain here (panes are rebuilt fresh on every segment
 //!   switch, so no per-controller state needs to persist between switches).
-//! - Colors pane exposes editable thresholds for the two band groups that
-//!   are actually consumed by a renderer today (`main.rs`'s `percent_dot`/
-//!   `temp_dot`, sourced from `settings.processor_colors`/
-//!   `temperature_colors`) — not a dynamic add/delete/`NSColorWell` table
-//!   for all 7 stored categories. The other 5 color vectors (fan/system/
-//!   battery/gpu/voltage) round-trip through TOML correctly but have no
-//!   consuming renderer yet, so a full editor for them would edit dead
-//!   settings — noted in the pane's own about-text, not hidden.
+//! - No Colors pane: the severity-dot renderer it used to configure
+//!   (`percent_dot`/`temp_dot`) was removed from the menu display, so a
+//!   threshold editor for it would edit dead settings.
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSBackingStoreType, NSButton, NSButtonType, NSImage, NSImageView, NSPopUpButton, NSSegmentedControl, NSTextField,
-    NSView, NSWindow, NSWindowStyleMask,
+    NSView, NSWindow, NSWindowStyleMask, NSWorkspace,
 };
-use objc2_foundation::{ns_string, MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    ns_string, MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL,
+};
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::settings::{IpProvider, Settings, SizeUnit, SpeedFormat, TempUnit};
-use crate::values::ColorThreshold;
 
-const PANE_TITLES: [&str; 6] = ["General", "Sensors", "Units", "Colors", "Network", "About"];
+const PANE_TITLES: [&str; 5] = ["General", "Sensors", "Units", "Network", "About"];
 
 const TAG_HIGHER_PRECISION: isize = 1;
-const TAG_ALPHABETIZE: isize = 2;
 const TAG_HIDE_ZEROS: isize = 3;
 const TAG_FIXED_WIDTHS: isize = 4;
-const TAG_HIDE_ICONS: isize = 5;
 
 const TAG_SHOW_TEMPERATURE: isize = 10;
 const TAG_SHOW_VOLTAGE: isize = 11;
@@ -59,9 +53,9 @@ const TAG_STORAGE_MEASUREMENT_POPUP: isize = 102;
 const TAG_SPEED_FORMAT_POPUP: isize = 103;
 const TAG_IP_PROVIDER_POPUP: isize = 104;
 
-// 200 + group*10 + band_index(0=green,1=yellow,2=red)
-const TAG_PROCESSOR_BAND_BASE: isize = 200;
-const TAG_TEMPERATURE_BAND_BASE: isize = 210;
+const TAG_GITHUB_LINK: isize = 200;
+const TAG_ISSUES_LINK: isize = 201;
+const TAG_AUTHOR_LINK: isize = 202;
 
 /// Sensor-key prefix -> the `Settings` category field it belongs to, for
 /// hot-sensor stash/restore when a category gets toggled off/on.
@@ -116,10 +110,17 @@ define_class!(
             self.handle_popup(sender.tag(), sender.indexOfSelectedItem());
         }
 
-        #[unsafe(method(thresholdChanged:))]
-        fn threshold_changed(&self, sender: &NSTextField) {
-            let text = sender.stringValue().to_string();
-            self.handle_threshold(sender.tag(), &text);
+        #[unsafe(method(openLink:))]
+        fn open_link(&self, sender: &NSButton) {
+            let url_str = match sender.tag() {
+                TAG_GITHUB_LINK => "https://github.com/nuflakbrr/pantau",
+                TAG_ISSUES_LINK => "https://github.com/nuflakbrr/pantau/issues/new",
+                TAG_AUTHOR_LINK => "https://github.com/nuflakbrr",
+                _ => return,
+            };
+            if let Some(url) = NSURL::URLWithString(&NSString::from_str(url_str)) {
+                NSWorkspace::sharedWorkspace().openURL(&url);
+            }
         }
     }
 );
@@ -209,9 +210,8 @@ impl PrefsWindowController {
             0 => build_general_pane(mtm, self, &settings),
             1 => build_sensors_pane(mtm, self, &settings),
             2 => build_units_pane(mtm, self, &settings),
-            3 => build_colors_pane(mtm, self, &settings),
-            4 => build_network_pane(mtm, self, &settings),
-            _ => build_about_pane(mtm),
+            3 => build_network_pane(mtm, self, &settings),
+            _ => build_about_pane(mtm, self),
         };
         drop(settings);
         container.addSubview(&view);
@@ -221,10 +221,8 @@ impl PrefsWindowController {
         let mut settings = self.ivars().settings.borrow_mut();
         let field = match tag {
             TAG_HIGHER_PRECISION => &mut settings.use_higher_precision,
-            TAG_ALPHABETIZE => &mut settings.alphabetize,
             TAG_HIDE_ZEROS => &mut settings.hide_zeros,
             TAG_FIXED_WIDTHS => &mut settings.fixed_widths,
-            TAG_HIDE_ICONS => &mut settings.hide_icons,
             TAG_INCLUDE_PUBLIC_IP => &mut settings.include_public_ip,
             TAG_SHOW_FLAG => &mut settings.network_public_ip_show_flag,
             _ => {
@@ -328,25 +326,6 @@ impl PrefsWindowController {
         self.rebuild_pane();
     }
 
-    fn handle_threshold(&self, tag: isize, text: &str) {
-        let Ok(value) = text.parse::<f64>() else {
-            return;
-        };
-        let mut settings = self.ivars().settings.borrow_mut();
-        let (bands, band_index) = if (TAG_PROCESSOR_BAND_BASE..TAG_PROCESSOR_BAND_BASE + 3).contains(&tag) {
-            (&mut settings.processor_colors, (tag - TAG_PROCESSOR_BAND_BASE) as usize)
-        } else if (TAG_TEMPERATURE_BAND_BASE..TAG_TEMPERATURE_BAND_BASE + 3).contains(&tag) {
-            (&mut settings.temperature_colors, (tag - TAG_TEMPERATURE_BAND_BASE) as usize)
-        } else {
-            return;
-        };
-        if let Some(band) = bands.get_mut(band_index) {
-            band.threshold = value;
-        }
-        drop(settings);
-        self.persist();
-    }
-
     fn persist(&self) {
         let _ = self.ivars().settings.borrow().save();
     }
@@ -409,22 +388,35 @@ fn popup(
     control
 }
 
-fn number_field(
+fn link_button(
     mtm: MainThreadMarker,
     controller: &PrefsWindowController,
-    value: f64,
+    title: &str,
     tag: isize,
     x: f64,
     y: f64,
-) -> Retained<NSTextField> {
-    let field = NSTextField::textFieldWithString(&NSString::from_str(&format!("{value:.0}")), mtm);
-    field.setTag(tag);
-    unsafe {
-        field.setTarget(Some(controller));
-        field.setAction(Some(sel!(thresholdChanged:)));
-    }
-    field.setFrame(NSRect { origin: NSPoint { x, y }, size: NSSize { width: 60.0, height: 22.0 } });
-    field
+    width: f64,
+) -> Retained<NSButton> {
+    let button = unsafe {
+        NSButton::buttonWithTitle_target_action(&NSString::from_str(title), Some(controller), Some(sel!(openLink:)), mtm)
+    };
+    button.setBezelStyle(objc2_app_kit::NSBezelStyle::Push);
+    button.setTag(tag);
+    button.setFrame(NSRect { origin: NSPoint { x, y }, size: NSSize { width, height: 28.0 } });
+    button
+}
+
+/// A borderless, text-sized link — for an inline credit line, unlike
+/// `link_button`'s full bezeled button meant for a standalone row.
+fn inline_link(mtm: MainThreadMarker, controller: &PrefsWindowController, title: &str, tag: isize, y: f64) -> Retained<NSButton> {
+    let button = unsafe {
+        NSButton::buttonWithTitle_target_action(&NSString::from_str(title), Some(controller), Some(sel!(openLink:)), mtm)
+    };
+    button.setBordered(false);
+    button.setAlignment(objc2_app_kit::NSTextAlignment::Left);
+    button.setTag(tag);
+    button.setFrame(NSRect { origin: NSPoint { x: 0.0, y }, size: NSSize { width: 300.0, height: 20.0 } });
+    button
 }
 
 fn container_view(mtm: MainThreadMarker) -> Retained<NSView> {
@@ -439,15 +431,8 @@ fn container_view(mtm: MainThreadMarker) -> Retained<NSView> {
 fn build_general_pane(mtm: MainThreadMarker, c: &PrefsWindowController, s: &Settings) -> Retained<NSView> {
     let view = container_view(mtm);
     view.addSubview(&checkbox(mtm, c, "Use higher precision", s.use_higher_precision, TAG_HIGHER_PRECISION, 310.0));
-    view.addSubview(&checkbox(mtm, c, "Alphabetize sensor list", s.alphabetize, TAG_ALPHABETIZE, 280.0));
-    view.addSubview(&checkbox(mtm, c, "Hide zero-value sensors", s.hide_zeros, TAG_HIDE_ZEROS, 250.0));
-    view.addSubview(&checkbox(mtm, c, "Fixed-width panel labels", s.fixed_widths, TAG_FIXED_WIDTHS, 220.0));
-    view.addSubview(&checkbox(mtm, c, "Hide panel icons", s.hide_icons, TAG_HIDE_ICONS, 190.0));
-    view.addSubview(&label(
-        mtm,
-        "Menu centered: not applicable on macOS (AppKit auto-positions menus)",
-        150.0,
-    ));
+    view.addSubview(&checkbox(mtm, c, "Hide zero-value sensors", s.hide_zeros, TAG_HIDE_ZEROS, 280.0));
+    view.addSubview(&checkbox(mtm, c, "Fixed-width panel labels", s.fixed_widths, TAG_FIXED_WIDTHS, 250.0));
     view
 }
 
@@ -517,47 +502,6 @@ fn build_units_pane(mtm: MainThreadMarker, c: &PrefsWindowController, s: &Settin
     view
 }
 
-fn band_row(
-    mtm: MainThreadMarker,
-    c: &PrefsWindowController,
-    parent: &NSView,
-    y: f64,
-    label_text: &str,
-    bands: &[ColorThreshold],
-    tag_base: isize,
-) {
-    parent.addSubview(&label(mtm, label_text, y));
-    let names = ["green from", "yellow from", "red from"];
-    for (i, band) in bands.iter().enumerate().take(3) {
-        let x = 180.0 + i as f64 * 90.0;
-        parent.addSubview(&label(mtm, names[i], y - 20.0));
-        parent.addSubview(&number_field(mtm, c, band.threshold, tag_base + i as isize, x, y - 40.0));
-    }
-}
-
-fn build_colors_pane(mtm: MainThreadMarker, c: &PrefsWindowController, s: &Settings) -> Retained<NSView> {
-    let view = container_view(mtm);
-    let processor_bands: Vec<ColorThreshold> = s.processor_colors.iter().map(ColorThreshold::from).collect();
-    let temperature_bands: Vec<ColorThreshold> = s.temperature_colors.iter().map(ColorThreshold::from).collect();
-    band_row(mtm, c, &view, 320.0, "CPU/Memory/Storage (%) thresholds", &processor_bands, TAG_PROCESSOR_BAND_BASE);
-    band_row(
-        mtm,
-        c,
-        &view,
-        220.0,
-        "CPU Temperature (\u{00B0}C) thresholds",
-        &temperature_bands,
-        TAG_TEMPERATURE_BAND_BASE,
-    );
-    view.addSubview(&label(
-        mtm,
-        "Fan/System/Battery/GPU/Voltage colors are stored but have no",
-        130.0,
-    ));
-    view.addSubview(&label(mtm, "colored-dot renderer wired up yet — editing them here would be inert.", 110.0));
-    view
-}
-
 fn build_network_pane(mtm: MainThreadMarker, c: &PrefsWindowController, s: &Settings) -> Retained<NSView> {
     let view = container_view(mtm);
     view.addSubview(&checkbox(mtm, c, "Include public IP", s.include_public_ip, TAG_INCLUDE_PUBLIC_IP, 310.0));
@@ -584,21 +528,43 @@ fn build_network_pane(mtm: MainThreadMarker, c: &PrefsWindowController, s: &Sett
     view
 }
 
-fn build_about_pane(mtm: MainThreadMarker) -> Retained<NSView> {
+fn build_about_pane(mtm: MainThreadMarker, c: &PrefsWindowController) -> Retained<NSView> {
     let view = container_view(mtm);
     // `imageNamed` resolves against the main bundle's Resources (where
     // `pkg/build.sh`/`release.sh` copy `assets/AppIcon.icns`) — returns
     // `None` gracefully when run as a raw dev binary with no bundle, so
     // the pane just shows text-only rather than a broken image well.
+    // Container is only 350pt tall (0..350) — y=340 for a 64pt-tall image
+    // put its top edge at 404, past the container's own bounds and
+    // straight into the segmented tab control sitting above it in the
+    // window. Keep the whole logo+text block inside 0..350.
     if let Some(logo) = NSImage::imageNamed(ns_string!("AppIcon")) {
         let image_view = NSImageView::new(mtm);
-        image_view.setFrame(NSRect { origin: NSPoint { x: 0.0, y: 340.0 }, size: NSSize { width: 64.0, height: 64.0 } });
+        image_view.setFrame(NSRect { origin: NSPoint { x: 0.0, y: 270.0 }, size: NSSize { width: 64.0, height: 64.0 } });
         image_view.setImage(Some(&logo));
         view.addSubview(&image_view);
     }
-    view.addSubview(&label(mtm, "pantau-app", 310.0));
-    view.addSubview(&label(mtm, "Native macOS system monitor.", 280.0));
-    view.addSubview(&label(mtm, "Rewritten from vitals-gnome (GPL-2.0) — clean-room,", 250.0));
-    view.addSubview(&label(mtm, "closed-source, no code or assets transcribed.", 230.0));
+    view.addSubview(&label(mtm, "Pantau", 240.0));
+    view.addSubview(&label(mtm, &format!("Version {}", crate::updater::CURRENT_VERSION), 218.0));
+    view.addSubview(&inline_link(mtm, c, "By Naufal Akbar Nugroho", TAG_AUTHOR_LINK, 196.0));
+    view.addSubview(&label(mtm, "Native macOS system monitor.", 166.0));
+    view.addSubview(&label(mtm, "Rewritten from vitals-gnome (GPL-2.0) — clean-room,", 136.0));
+    view.addSubview(&label(mtm, "no code or assets transcribed. Licensed under MIT.", 116.0));
+    // Two equal-width buttons spanning the container's full 448pt width
+    // (not the 420pt label box width — that left a 28pt dead gap on the
+    // right, on top of the window's own right margin, reading as
+    // off-center), edge to edge with a 12pt gap between them.
+    const LINK_GAP: f64 = 12.0;
+    let link_width = (448.0 - LINK_GAP) / 2.0;
+    view.addSubview(&link_button(mtm, c, "View on GitHub", TAG_GITHUB_LINK, 0.0, 10.0, link_width));
+    view.addSubview(&link_button(
+        mtm,
+        c,
+        "Report an Issue",
+        TAG_ISSUES_LINK,
+        link_width + LINK_GAP,
+        10.0,
+        link_width,
+    ));
     view
 }
