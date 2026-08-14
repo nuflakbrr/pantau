@@ -778,7 +778,7 @@ impl AppDelegate {
             // isn't included in the count — close enough for a soft cap).
             // All pins still count as hot/toggled; only the shown count
             // shrinks.
-            const MAX_TITLE_CHARS: usize = 36;
+            const MAX_TITLE_CHARS: usize = 52;
             let mut shown_len = 0usize;
             let mut shown = 0usize;
             for d in &pinned {
@@ -1013,7 +1013,10 @@ impl AppDelegate {
                 ),
             );
         }
-        let mut interfaces: Vec<(&String, &network::InterfaceReading)> = network_readings.iter().collect();
+        let mut interfaces: Vec<(&String, &network::InterfaceReading)> = network_readings
+            .iter()
+            .filter(|(_, r)| r.rx_bytes_per_sec > 0.0 || r.tx_bytes_per_sec > 0.0)
+            .collect();
         interfaces.sort_by(|a, b| a.0.cmp(b.0));
         for (name, reading) in interfaces {
             add_info_row(

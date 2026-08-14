@@ -34,11 +34,11 @@ fn read_raw_counters() -> HashMap<String, RawCounters> {
             if name.starts_with(LOOPBACK_PREFIX) {
                 continue;
             }
-            // macOS populates AF_LINK ifa_data as `struct if_data64`.
-            let data = &*(entry.ifa_data as *const libc::if_data64);
+            // macOS getifaddrs populates AF_LINK ifa_data as `struct if_data`.
+            let data = &*(entry.ifa_data as *const libc::if_data);
             let counters = out.entry(name).or_insert(RawCounters::default());
-            counters.rx_bytes += data.ifi_ibytes;
-            counters.tx_bytes += data.ifi_obytes;
+            counters.rx_bytes += data.ifi_ibytes as u64;
+            counters.tx_bytes += data.ifi_obytes as u64;
         }
         libc::freeifaddrs(head);
     }
@@ -138,3 +138,31 @@ pub fn aggregate(readings: &HashMap<String, InterfaceReading>) -> InterfaceReadi
     }
     agg
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_raw_counters_from_system() {
+        let counters = read_raw_counters();
+        // Almost every machine has active interfaces (e.g. en0)
+        // Ensure that for any interface present, we don't crash and get valid counts.
+        let mut total_rx = 0;
+        let mut total_tx = 0;
+        for (_name, c) in &counters {
+            total_rx += c.rx_bytes;
+            total_tx += c.tx_bytes;
+        }
+        assert!(total_rx > 0 || total_tx > 0 || counters.is_empty());
+    }
+
+    #[test]
+    fn accumulator_produces_readings() {
+        let mut acc = NetworkAccumulator::new();
+        let first = acc.sample();
+        let second = acc.sample();
+        assert_eq!(first.len(), second.len());
+    }
+}
+
