@@ -13,13 +13,15 @@
 //!   (`percent_dot`/`temp_dot`) was removed from the menu display, so a
 //!   threshold editor for it would edit dead settings.
 use objc2::rc::Retained;
-use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSBackingStoreType, NSButton, NSButtonType, NSImage, NSImageView, NSPopUpButton, NSSegmentedControl, NSTextField,
-    NSView, NSWindow, NSWindowStyleMask, NSWorkspace,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSButtonType, NSCursor,
+    NSEvent, NSImage, NSImageView, NSPopUpButton, NSSegmentedControl, NSTextField, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
-    ns_string, MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL,
+    ns_string, MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
+    NSString, NSURL,
 };
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
@@ -57,6 +59,92 @@ const TAG_GITHUB_LINK: isize = 200;
 const TAG_ISSUES_LINK: isize = 201;
 const TAG_AUTHOR_LINK: isize = 202;
 
+define_class!(
+    #[unsafe(super(NSSegmentedControl))]
+    #[thread_kind = MainThreadOnly]
+    pub struct PointerSegmentedControl;
+
+    impl PointerSegmentedControl {
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            let bounds = self.bounds();
+            self.addCursorRect_cursor(bounds, &NSCursor::pointingHandCursor());
+        }
+
+        #[unsafe(method(cursorUpdate:))]
+        fn cursor_update(&self, _event: &NSEvent) {
+            NSCursor::pointingHandCursor().set();
+        }
+
+        #[unsafe(method(updateTrackingAreas))]
+        fn update_tracking_areas(&self) {
+            let options = NSTrackingAreaOptions::CursorUpdate
+                | NSTrackingAreaOptions::ActiveAlways
+                | NSTrackingAreaOptions::InVisibleRect;
+            let tracking = unsafe {
+                NSTrackingArea::initWithRect_options_owner_userInfo(
+                    NSTrackingArea::alloc(),
+                    self.bounds(),
+                    options,
+                    Some(self),
+                    None,
+                )
+            };
+            self.addTrackingArea(&tracking);
+        }
+    }
+);
+
+impl PointerSegmentedControl {
+    pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+define_class!(
+    #[unsafe(super(NSButton))]
+    #[thread_kind = MainThreadOnly]
+    pub struct PointerButton;
+
+    impl PointerButton {
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            let bounds = self.bounds();
+            self.addCursorRect_cursor(bounds, &NSCursor::pointingHandCursor());
+        }
+
+        #[unsafe(method(cursorUpdate:))]
+        fn cursor_update(&self, _event: &NSEvent) {
+            NSCursor::pointingHandCursor().set();
+        }
+
+        #[unsafe(method(updateTrackingAreas))]
+        fn update_tracking_areas(&self) {
+            let options = NSTrackingAreaOptions::CursorUpdate
+                | NSTrackingAreaOptions::ActiveAlways
+                | NSTrackingAreaOptions::InVisibleRect;
+            let tracking = unsafe {
+                NSTrackingArea::initWithRect_options_owner_userInfo(
+                    NSTrackingArea::alloc(),
+                    self.bounds(),
+                    options,
+                    Some(self),
+                    None,
+                )
+            };
+            self.addTrackingArea(&tracking);
+        }
+    }
+);
+
+impl PointerButton {
+    pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
 /// Sensor-key prefix -> the `Settings` category field it belongs to, for
 /// hot-sensor stash/restore when a category gets toggled off/on.
 fn category_for_key(key: &str) -> Option<&'static str> {
@@ -76,7 +164,7 @@ fn category_for_key(key: &str) -> Option<&'static str> {
 
 pub struct PrefsWindowIvars {
     window: OnceCell<Retained<NSWindow>>,
-    segmented: OnceCell<Retained<NSSegmentedControl>>,
+    segmented: OnceCell<Retained<PointerSegmentedControl>>,
     content_container: OnceCell<Retained<NSView>>,
     /// Shared with `AppDelegate` — mutations here are immediately visible
     /// there too, no callback plumbing needed.
@@ -93,8 +181,16 @@ define_class!(
     pub struct PrefsWindowController;
 
     unsafe impl NSObjectProtocol for PrefsWindowController {}
+    unsafe impl NSWindowDelegate for PrefsWindowController {}
 
     impl PrefsWindowController {
+        #[unsafe(method(windowWillClose:))]
+        fn window_will_close(&self, _notification: &NSNotification) {
+            let mtm = self.mtm();
+            let app = NSApplication::sharedApplication(mtm);
+            app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        }
+
         #[unsafe(method(segmentChanged:))]
         fn segment_changed(&self, _sender: &NSSegmentedControl) {
             self.rebuild_pane();
@@ -142,12 +238,15 @@ impl PrefsWindowController {
     pub fn show(&self) {
         if let Some(window) = self.ivars().window.get() {
             let mtm = self.mtm();
-            let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+            let app = NSApplication::sharedApplication(mtm);
+            app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
             #[allow(deprecated)]
             app.activateIgnoringOtherApps(true);
             window.center();
             window.makeKeyAndOrderFront(None);
             window.orderFrontRegardless();
+            window.enableCursorRects();
+            window.resetCursorRects();
         }
     }
 
@@ -164,12 +263,15 @@ impl PrefsWindowController {
             )
         };
         window.setTitle(ns_string!("Preferences"));
+        window.setAcceptsMouseMovedEvents(true);
+        let delegate = objc2::runtime::ProtocolObject::from_ref(self);
+        window.setDelegate(Some(delegate));
         unsafe { window.setReleasedWhenClosed(false) };
 
         let content = NSView::new(mtm);
         content.setFrame(frame);
 
-        let segmented = NSSegmentedControl::new(mtm);
+        let segmented = PointerSegmentedControl::new(mtm);
         segmented.setSegmentCount(PANE_TITLES.len() as isize);
         for (i, title) in PANE_TITLES.iter().enumerate() {
             segmented.setLabel_forSegment(&NSString::from_str(title), i as isize);
@@ -220,6 +322,10 @@ impl PrefsWindowController {
         };
         drop(settings);
         container.addSubview(&view);
+        if let Some(window) = self.ivars().window.get() {
+            window.invalidateCursorRectsForView(container);
+            window.resetCursorRects();
+        }
     }
 
     fn handle_toggle(&self, tag: isize) {
@@ -350,14 +456,8 @@ fn checkbox(
     tag: isize,
     y: f64,
 ) -> Retained<NSButton> {
-    let button = unsafe {
-        NSButton::buttonWithTitle_target_action(
-            &NSString::from_str(title),
-            Some(controller),
-            Some(sel!(toggleField:)),
-            mtm,
-        )
-    };
+    let button = PointerButton::new(mtm);
+    button.setTitle(&NSString::from_str(title));
     button.setButtonType(NSButtonType::Switch);
     button.setState(if checked {
         objc2_app_kit::NSControlStateValueOn
@@ -365,8 +465,12 @@ fn checkbox(
         objc2_app_kit::NSControlStateValueOff
     });
     button.setTag(tag);
+    unsafe {
+        button.setTarget(Some(controller));
+        button.setAction(Some(sel!(toggleField:)));
+    }
     button.setFrame(NSRect { origin: NSPoint { x: 0.0, y }, size: NSSize { width: 420.0, height: 20.0 } });
-    button
+    Retained::into_super(button)
 }
 
 fn popup(
@@ -402,26 +506,32 @@ fn link_button(
     y: f64,
     width: f64,
 ) -> Retained<NSButton> {
-    let button = unsafe {
-        NSButton::buttonWithTitle_target_action(&NSString::from_str(title), Some(controller), Some(sel!(openLink:)), mtm)
-    };
+    let button = PointerButton::new(mtm);
+    button.setTitle(&NSString::from_str(title));
     button.setBezelStyle(objc2_app_kit::NSBezelStyle::Push);
     button.setTag(tag);
+    unsafe {
+        button.setTarget(Some(controller));
+        button.setAction(Some(sel!(openLink:)));
+    }
     button.setFrame(NSRect { origin: NSPoint { x, y }, size: NSSize { width, height: 28.0 } });
-    button
+    Retained::into_super(button)
 }
 
 /// A borderless, text-sized link — for an inline credit line, unlike
 /// `link_button`'s full bezeled button meant for a standalone row.
 fn inline_link(mtm: MainThreadMarker, controller: &PrefsWindowController, title: &str, tag: isize, y: f64) -> Retained<NSButton> {
-    let button = unsafe {
-        NSButton::buttonWithTitle_target_action(&NSString::from_str(title), Some(controller), Some(sel!(openLink:)), mtm)
-    };
+    let button = PointerButton::new(mtm);
+    button.setTitle(&NSString::from_str(title));
     button.setBordered(false);
     button.setAlignment(objc2_app_kit::NSTextAlignment::Left);
     button.setTag(tag);
+    unsafe {
+        button.setTarget(Some(controller));
+        button.setAction(Some(sel!(openLink:)));
+    }
     button.setFrame(NSRect { origin: NSPoint { x: 0.0, y }, size: NSSize { width: 300.0, height: 20.0 } });
-    button
+    Retained::into_super(button)
 }
 
 fn container_view(mtm: MainThreadMarker) -> Retained<NSView> {
