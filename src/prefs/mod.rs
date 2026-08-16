@@ -141,8 +141,13 @@ impl PrefsWindowController {
 
     pub fn show(&self) {
         if let Some(window) = self.ivars().window.get() {
+            let mtm = self.mtm();
+            let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+            #[allow(deprecated)]
+            app.activateIgnoringOtherApps(true);
             window.center();
             window.makeKeyAndOrderFront(None);
+            window.orderFrontRegardless();
         }
     }
 
