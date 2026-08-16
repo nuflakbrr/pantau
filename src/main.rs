@@ -1,3 +1,5 @@
+#[allow(dead_code)]
+mod cleaner;
 mod prefs;
 mod sensors;
 mod settings;
@@ -84,11 +86,26 @@ fn set_status_gauge_icon(button: &objc2_app_kit::NSButton, show: bool) {
     }
 }
 
-/// SF Symbol rendered as an inline `NSAttributedString` fragment (one
-/// `NSTextAttachment` character) — for embedding an icon glyph directly
-/// inside a button or menu item title so it stays perfectly aligned.
 fn icon_attachment_string(symbol: &str) -> Option<Retained<NSAttributedString>> {
-    let icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(symbol), None)?;
+    let lookup_names: &[&str] = match symbol {
+        "broom" | "clean" => &["broom.fill", "broom", "sparkles", "wand.and.stars", "eraser.fill"],
+        "trash" | "uninstall" => &["trash.fill", "trash", "xmark.bin.fill"],
+        "archivebox" => &["archivebox.fill", "archivebox", "shippingbox.fill"],
+        "bolt.fill" | "optimize" => &["bolt.fill", "bolt"],
+        "internaldrive" | "disk" => &["internaldrive", "internaldrive.fill"],
+        "chart.bar.fill" | "status" => &["chart.bar.fill", "chart.bar.xaxis", "chart.bar"],
+        "lock.shield" | "touchid" => &["lock.shield.fill", "lock.shield", "touchid", "lock.fill"],
+        "terminal" | "apple.terminal" => &["terminal", "apple.terminal"],
+        _ => &[symbol],
+    };
+    let mut icon_opt = None;
+    for n in lookup_names {
+        if let Some(icon) = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(n), None) {
+            icon_opt = Some(icon);
+            break;
+        }
+    }
+    let icon = icon_opt?;
     icon.setTemplate(true);
     icon.setSize(objc2_foundation::NSSize { width: 14.0, height: 14.0 });
     let attachment = NSTextAttachment::new();
@@ -125,9 +142,6 @@ fn menu_attributed_title(checked: Option<bool>, symbol: Option<&str>, text: &str
 
     if let Some(is_checked) = checked {
         title.appendAttributedString(&checkmark_attachment_string(is_checked));
-        title.appendAttributedString(&space());
-    } else {
-        title.appendAttributedString(&checkmark_attachment_string(false));
         title.appendAttributedString(&space());
     }
 
@@ -201,6 +215,7 @@ struct AppDelegateIvars {
     /// sides always see the same live settings without a callback closure.
     settings: std::rc::Rc<RefCell<settings::Settings>>,
     prefs_window: RefCell<Option<Retained<prefs::PrefsWindowController>>>,
+    cleaner_window: RefCell<Option<Retained<cleaner::CleanerWindowController>>>,
     timer: RefCell<Option<Retained<NSTimer>>>,
     network_accumulator: RefCell<NetworkAccumulator>,
     battery_time_left: RefCell<TimeLeftEstimator>,
@@ -338,6 +353,61 @@ define_class!(
                 .spawn();
         }
 
+        #[unsafe(method(cleanTapped:))]
+        fn clean_tapped(&self, _sender: &NSMenuItem) {
+            self.show_cleaner_deep_scan();
+        }
+
+        #[unsafe(method(uninstallTapped:))]
+        fn uninstall_tapped(&self, _sender: &NSMenuItem) {
+            cleaner::launch_in_terminal("uninstall");
+        }
+
+        #[unsafe(method(optimizeTapped:))]
+        fn optimize_tapped(&self, _sender: &NSMenuItem) {
+            self.show_cleaner_optimizer();
+        }
+
+        #[unsafe(method(analyzeTapped:))]
+        fn analyze_tapped(&self, _sender: &NSMenuItem) {
+            self.show_cleaner_disk_analyzer();
+        }
+
+        #[unsafe(method(statusTapped:))]
+        fn status_tapped(&self, _sender: &NSMenuItem) {
+            self.show_cleaner_live_status();
+        }
+
+        #[unsafe(method(purgeTapped:))]
+        fn purge_tapped(&self, _sender: &NSMenuItem) {
+            self.show_cleaner_project_purge();
+        }
+
+        #[unsafe(method(installerTapped:))]
+        fn installer_tapped(&self, _sender: &NSMenuItem) {
+            self.show_cleaner_installer_clean();
+        }
+
+        #[unsafe(method(touchIdTapped:))]
+        fn touch_id_tapped(&self, _sender: &NSMenuItem) {
+            self.show_cleaner_touch_id();
+        }
+
+        #[unsafe(method(historyTapped:))]
+        fn history_tapped(&self, _sender: &NSMenuItem) {
+            self.show_cleaner_history();
+        }
+
+        #[unsafe(method(openCliTapped:))]
+        fn open_cli_tapped(&self, _sender: &NSMenuItem) {
+            cleaner::launch_in_terminal("");
+        }
+
+        #[unsafe(method(cleanerWindowTapped:))]
+        fn cleaner_window_tapped(&self, _sender: &NSMenuItem) {
+            self.show_cleaner_dashboard();
+        }
+
         #[unsafe(method(preferencesTapped:))]
         fn preferences_tapped(&self, _sender: &NSMenuItem) {
             let mtm = self.mtm();
@@ -375,6 +445,7 @@ impl AppDelegate {
             hot_sensors: RefCell::new(hot_sensors),
             settings: std::rc::Rc::new(RefCell::new(settings)),
             prefs_window: RefCell::new(None),
+            cleaner_window: RefCell::new(None),
             timer: RefCell::new(None),
             network_accumulator: RefCell::new(NetworkAccumulator::new()),
             battery_time_left: RefCell::new(TimeLeftEstimator::new()),
@@ -394,8 +465,128 @@ impl AppDelegate {
         unsafe { msg_send![super(this), init] }
     }
 
+    pub fn show_cleaner_dashboard(&self) {
+        let mtm = self.mtm();
+        let existing = self.ivars().cleaner_window.borrow().clone();
+        match existing {
+            Some(controller) => controller.show_dashboard(),
+            None => {
+                let controller = cleaner::CleanerWindowController::new(mtm);
+                controller.show_dashboard();
+                *self.ivars().cleaner_window.borrow_mut() = Some(controller);
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn show_cleaner_deep_scan(&self) {
+        let mtm = self.mtm();
+        let existing = self.ivars().cleaner_window.borrow().clone();
+        match existing {
+            Some(controller) => controller.show_deep_scan(),
+            None => {
+                let controller = cleaner::CleanerWindowController::new(mtm);
+                controller.show_deep_scan();
+                *self.ivars().cleaner_window.borrow_mut() = Some(controller);
+            }
+        }
+    }
+
+    pub fn show_cleaner_project_purge(&self) {
+        let mtm = self.mtm();
+        let existing = self.ivars().cleaner_window.borrow().clone();
+        match existing {
+            Some(controller) => controller.show_project_purge(),
+            None => {
+                let controller = cleaner::CleanerWindowController::new(mtm);
+                controller.show_project_purge();
+                *self.ivars().cleaner_window.borrow_mut() = Some(controller);
+            }
+        }
+    }
+
+    pub fn show_cleaner_installer_clean(&self) {
+        let mtm = self.mtm();
+        let existing = self.ivars().cleaner_window.borrow().clone();
+        match existing {
+            Some(controller) => controller.show_installer_clean(),
+            None => {
+                let controller = cleaner::CleanerWindowController::new(mtm);
+                controller.show_installer_clean();
+                *self.ivars().cleaner_window.borrow_mut() = Some(controller);
+            }
+        }
+    }
+
+    pub fn show_cleaner_optimizer(&self) {
+        let mtm = self.mtm();
+        let existing = self.ivars().cleaner_window.borrow().clone();
+        match existing {
+            Some(controller) => controller.show_optimizer(),
+            None => {
+                let controller = cleaner::CleanerWindowController::new(mtm);
+                controller.show_optimizer();
+                *self.ivars().cleaner_window.borrow_mut() = Some(controller);
+            }
+        }
+    }
+
+    pub fn show_cleaner_disk_analyzer(&self) {
+        let mtm = self.mtm();
+        let existing = self.ivars().cleaner_window.borrow().clone();
+        match existing {
+            Some(controller) => controller.show_disk_analyzer(),
+            None => {
+                let controller = cleaner::CleanerWindowController::new(mtm);
+                controller.show_disk_analyzer();
+                *self.ivars().cleaner_window.borrow_mut() = Some(controller);
+            }
+        }
+    }
+
+    pub fn show_cleaner_live_status(&self) {
+        let mtm = self.mtm();
+        let existing = self.ivars().cleaner_window.borrow().clone();
+        match existing {
+            Some(controller) => controller.show_live_status(),
+            None => {
+                let controller = cleaner::CleanerWindowController::new(mtm);
+                controller.show_live_status();
+                *self.ivars().cleaner_window.borrow_mut() = Some(controller);
+            }
+        }
+    }
+
+    pub fn show_cleaner_touch_id(&self) {
+        let mtm = self.mtm();
+        let existing = self.ivars().cleaner_window.borrow().clone();
+        match existing {
+            Some(controller) => controller.show_touch_id(),
+            None => {
+                let controller = cleaner::CleanerWindowController::new(mtm);
+                controller.show_touch_id();
+                *self.ivars().cleaner_window.borrow_mut() = Some(controller);
+            }
+        }
+    }
+
+    pub fn show_cleaner_history(&self) {
+        let mtm = self.mtm();
+        let existing = self.ivars().cleaner_window.borrow().clone();
+        match existing {
+            Some(controller) => controller.show_history(),
+            None => {
+                let controller = cleaner::CleanerWindowController::new(mtm);
+                controller.show_history();
+                *self.ivars().cleaner_window.borrow_mut() = Some(controller);
+            }
+        }
+    }
+
     /// Syncs `hot_sensors` back into `settings` and persists to disk —
     /// called after every pin toggle so pins survive a restart.
+
+
     fn persist_hot_sensors(&self) {
         let hot = self.ivars().hot_sensors.borrow();
         let mut settings = self.ivars().settings.borrow_mut();
@@ -1155,18 +1346,50 @@ impl AppDelegate {
 
             menu.addItem(&objc2_app_kit::NSMenuItem::separatorItem(mtm));
 
-            let action_row = |title: &str, action: objc2::runtime::Sel| {
+            let action_row = |symbol: Option<&str>, title: &str, action: objc2::runtime::Sel| {
                 let item = NSMenuItem::new(mtm);
-                item.setTitle(&NSString::from_str(title));
+                let attr_title = menu_attributed_title(None, symbol, title);
+                item.setAttributedTitle(Some(&attr_title));
                 unsafe {
                     item.setTarget(Some(self));
                     item.setAction(Some(action));
                 }
                 menu.addItem(&item);
             };
-            action_row("System Monitor", sel!(systemMonitorTapped:));
-            action_row(&format!("Check for Updates (v{})", updater::CURRENT_VERSION), sel!(checkForUpdatesTapped:));
-            action_row("Preferences", sel!(preferencesTapped:));
+            action_row(Some("gauge"), "System Monitor", sel!(systemMonitorTapped:));
+
+            // Pantau Cleaner Accordion / Submenu
+            let cleaner_menu = NSMenu::new(mtm);
+            cleaner_menu.setAutoenablesItems(false);
+            let add_cleaner_item = |title: &str, action: objc2::runtime::Sel| {
+                let it = NSMenuItem::new(mtm);
+                it.setTitle(&NSString::from_str(title));
+                unsafe {
+                    it.setTarget(Some(self));
+                    it.setAction(Some(action));
+                }
+                cleaner_menu.addItem(&it);
+            };
+            add_cleaner_item("Open Pantau Cleaner", sel!(cleanerWindowTapped:));
+            cleaner_menu.addItem(&objc2_app_kit::NSMenuItem::separatorItem(mtm));
+            add_cleaner_item("Disk & Cache Cleaner", sel!(cleanTapped:));
+            add_cleaner_item("Uninstall App", sel!(uninstallTapped:));
+            add_cleaner_item("Optimize", sel!(optimizeTapped:));
+            add_cleaner_item("Disk Analyzer", sel!(analyzeTapped:));
+            add_cleaner_item("Status", sel!(statusTapped:));
+            add_cleaner_item("Configure Touch ID", sel!(touchIdTapped:));
+            add_cleaner_item("History Logs", sel!(historyTapped:));
+            cleaner_menu.addItem(&objc2_app_kit::NSMenuItem::separatorItem(mtm));
+            add_cleaner_item("Open with Terminal", sel!(openCliTapped:));
+
+            let cleaner_item = NSMenuItem::new(mtm);
+            let cleaner_title = menu_attributed_title(None, Some("sparkles"), "Pantau Cleaner");
+            cleaner_item.setAttributedTitle(Some(&cleaner_title));
+            cleaner_item.setSubmenu(Some(&cleaner_menu));
+            menu.addItem(&cleaner_item);
+
+            action_row(Some("arrow.triangle.2.circlepath"), &format!("Check for Updates (v{})", updater::CURRENT_VERSION), sel!(checkForUpdatesTapped:));
+            action_row(Some("gearshape"), "Preferences", sel!(preferencesTapped:));
 
             self.ivars().menu_structure_built.set(true);
         }
@@ -1174,6 +1397,20 @@ impl AppDelegate {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let prog_name = args.first().map(|s| s.as_str()).unwrap_or("");
+    if args.len() > 1
+        || prog_name.ends_with("/pnt")
+        || prog_name == "pnt"
+        || prog_name.ends_with("/pantau")
+        || prog_name == "pantau"
+    {
+        if let Err(e) = cleaner::run_cli() {
+            eprintln!("Error: {}", e);
+        }
+        return;
+    }
+
     let mtm = MainThreadMarker::new().expect("must run on main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);

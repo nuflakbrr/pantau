@@ -20,6 +20,12 @@ pkill -x pantau-app 2>/dev/null || true
 rm -rf "/Applications/Pantau.app"
 cp -R "$STAGE" /Applications/
 rm -rf "$(dirname "$STAGE")"
+
+mkdir -p "$HOME/.local/bin"
+ln -sf "/Applications/Pantau.app/Contents/MacOS/pantau-app" "$HOME/.local/bin/pantau"
+ln -sf "/Applications/Pantau.app/Contents/MacOS/pantau-app" "$HOME/.local/bin/pnt"
+
 open /Applications/Pantau.app
 
 echo "Installed to /Applications/Pantau.app and launched."
+echo "CLI tools available at ~/.local/bin/pantau and ~/.local/bin/pnt"

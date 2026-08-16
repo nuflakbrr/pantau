@@ -1,0 +1,19 @@
+pub mod analyze;
+pub mod clean;
+pub mod cli;
+pub mod config;
+pub mod history;
+pub mod installer;
+pub mod optimize;
+pub mod purge;
+pub mod safety;
+pub mod status;
+pub mod terminal;
+pub mod touchid;
+pub mod tui;
+pub mod uninstall;
+pub mod window;
+
+pub use cli::run_cli;
+pub use terminal::launch_in_terminal;
+pub use window::CleanerWindowController;

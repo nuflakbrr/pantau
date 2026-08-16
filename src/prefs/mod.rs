@@ -188,7 +188,22 @@ define_class!(
         fn window_will_close(&self, _notification: &NSNotification) {
             let mtm = self.mtm();
             let app = NSApplication::sharedApplication(mtm);
-            app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+            let my_win: Option<&NSWindow> = self.ivars().window.get().map(|w| &**w);
+            let mut other_visible = false;
+            for win in app.windows().iter() {
+                if let Some(closing) = my_win {
+                    if std::ptr::eq(&*win, closing) {
+                        continue;
+                    }
+                }
+                if win.isVisible() && win.canBecomeKeyWindow() {
+                    other_visible = true;
+                    break;
+                }
+            }
+            if !other_visible {
+                app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+            }
         }
 
         #[unsafe(method(segmentChanged:))]

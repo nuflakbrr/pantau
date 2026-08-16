@@ -15,3 +15,13 @@ toml = "0.8"
 directories = "5"
 ureq = { version = "2", features = ["json"] }
 serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+ratatui = "0.29"
+crossterm = "0.28"
+rayon = "1.10"
+jwalk = "0.8"
+trash = "5.2"
+walkdir = "2.5"
+regex = "1.10"
+chrono = "0.4"
