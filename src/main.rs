@@ -1358,7 +1358,7 @@ impl AppDelegate {
             };
             action_row(Some("gauge"), "System Monitor", sel!(systemMonitorTapped:));
 
-            // Pantau Cleaner Accordion / Submenu
+            // Pantau Cleaner is temporarily disabled while the feature is stabilized.
             let cleaner_menu = NSMenu::new(mtm);
             cleaner_menu.setAutoenablesItems(false);
             let add_cleaner_item = |title: &str, action: objc2::runtime::Sel| {
@@ -1386,6 +1386,7 @@ impl AppDelegate {
             let cleaner_title = menu_attributed_title(None, Some("sparkles"), "Pantau Cleaner");
             cleaner_item.setAttributedTitle(Some(&cleaner_title));
             cleaner_item.setSubmenu(Some(&cleaner_menu));
+            cleaner_item.setEnabled(false);
             menu.addItem(&cleaner_item);
 
             action_row(Some("arrow.triangle.2.circlepath"), &format!("Check for Updates (v{})", updater::CURRENT_VERSION), sel!(checkForUpdatesTapped:));
