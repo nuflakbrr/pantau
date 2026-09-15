@@ -35,6 +35,20 @@ fn cfstring(s: &str) -> Option<CFStringRef> {
     }
 }
 
+fn read_pmset_time_minutes() -> Option<f64> {
+    // ponytail: subprocess fallback only when IOKit omits battery time; replace with a
+    // cached IOKit registry read if this becomes measurable on older Macs.
+    let output = std::process::Command::new("pmset").args(["-g", "batt"]).output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let token = text.split_whitespace().find(|token| *token == "remaining")?;
+    let _ = token;
+    let time = text.split_whitespace().find_map(|part| {
+        let (hours, minutes) = part.split_once(':')?;
+        Some(hours.parse::<f64>().ok()? * 60.0 + minutes.parse::<f64>().ok()?)
+    })?;
+    (time > 0.0).then_some(time)
+}
+
 unsafe fn dict_lookup(dict: CFDictionaryRef, key: &str) -> *const c_void {
     let Some(cfkey) = cfstring(key) else {
         return std::ptr::null();
@@ -161,12 +175,28 @@ pub fn read_battery() -> BatteryReading {
             _ => None,
         };
 
-        let raw_time_left_minutes = if is_charging == Some(true) {
-            dict_get_i64(desc, "Time to Full Charge")
+        let reported_time = if is_charging == Some(true) {
+            dict_get_i64(desc, "Time to Full Charge").or_else(|| dict_get_i64(desc, "TimeRemaining"))
         } else {
-            dict_get_i64(desc, "Time to Empty")
-        }
-        .map(|m| m as f64);
+            dict_get_i64(desc, "Time to Empty").or_else(|| dict_get_i64(desc, "TimeRemaining"))
+        };
+        let raw_time_left_minutes = reported_time
+            .filter(|&m| m > 0 && m < 65_535)
+            .map(|m| m as f64)
+            .or_else(|| {
+                let (current, max, rate) = (current?, max?, raw_amperage?);
+                let rate = (rate as f64).abs();
+                if rate <= 0.0 || max <= 0 {
+                    return None;
+                }
+                let remaining_capacity = if is_charging == Some(true) {
+                    (max - current).max(0)
+                } else {
+                    current.max(0)
+                };
+                Some(remaining_capacity as f64 / rate * 60.0)
+            })
+            .or_else(read_pmset_time_minutes);
 
         BatteryReading {
             is_present: dict_get_bool(desc, "Is Present"),
@@ -201,15 +231,16 @@ impl TimeLeftEstimator {
     }
 
     /// `raw_minutes` should come from a fresh per-tick estimate; negative
-    /// values (IOKit's "still calculating" sentinel) are ignored rather than
-    /// polluting the average.
+    /// values (IOKit's "still calculating" sentinels) are ignored rather than
+    /// polluting the average. Zero is also not a usable estimate: macOS uses
+    /// it when the remaining time is unavailable or still being calculated.
     pub fn push(&mut self, is_charging: bool, raw_minutes: Option<f64>) -> Option<f64> {
         if self.last_charging != Some(is_charging) {
             self.samples.clear();
             self.last_charging = Some(is_charging);
         }
         let raw = raw_minutes?;
-        if raw < 0.0 {
+        if raw <= 0.0 {
             return None;
         }
         self.samples.push_back(raw);
@@ -332,6 +363,12 @@ mod tests {
     fn ignores_negative_sentinel() {
         let mut est = TimeLeftEstimator::new();
         assert_eq!(est.push(true, Some(-1.0)), None);
+    }
+
+    #[test]
+    fn ignores_zero_sentinel() {
+        let mut est = TimeLeftEstimator::new();
+        assert_eq!(est.push(false, Some(0.0)), None);
     }
 
     #[test]

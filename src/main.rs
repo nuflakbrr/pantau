@@ -229,6 +229,7 @@ struct AppDelegateIvars {
     /// thread (the freshly-downloaded copy is already launched by then),
     /// so there's nothing to marshal back for that case.
     update_install: RefCell<Option<std::sync::mpsc::Receiver<Result<(), String>>>>,
+    update_status_item: RefCell<Option<Retained<NSMenuItem>>>,
     public_ip_watcher: RefCell<PublicIpWatcher>,
     /// `None` if `AppleSMC` couldn't be opened at all (should not happen on
     /// real Mac hardware, but never assume) — thermal rows are simply
@@ -424,7 +425,7 @@ define_class!(
 
         #[unsafe(method(checkForUpdatesTapped:))]
         fn check_for_updates_tapped(&self, _sender: &NSMenuItem) {
-            if self.ivars().update_check.borrow().is_some() {
+            if self.ivars().update_check.borrow().is_some() || self.ivars().update_install.borrow().is_some() {
                 return; // a check is already in flight
             }
             *self.ivars().update_check.borrow_mut() = Some(updater::check_async());
@@ -453,6 +454,7 @@ impl AppDelegate {
             battery_health: RefCell::new(battery::BatteryHealthWatcher::new()),
             update_check: RefCell::new(None),
             update_install: RefCell::new(None),
+            update_status_item: RefCell::new(None),
             public_ip_watcher: RefCell::new(PublicIpWatcher::new()),
             smc: OnceCell::new(),
             thermal_probe: OnceCell::new(),
@@ -642,6 +644,9 @@ impl AppDelegate {
                 alert.addButtonWithTitle(&NSString::from_str("Later"));
                 let response = alert.runModal();
                 if response == objc2_app_kit::NSAlertFirstButtonReturn {
+                    if let Some(item) = self.ivars().update_status_item.borrow().as_ref() {
+                        item.setTitle(ns_string!("Downloading update…"));
+                    }
                     let (tx, rx) = std::sync::mpsc::channel();
                     std::thread::spawn(move || {
                         // The freshly-installed copy is already launched at
@@ -667,6 +672,9 @@ impl AppDelegate {
             return;
         };
         *self.ivars().update_install.borrow_mut() = None;
+        if let Some(item) = self.ivars().update_status_item.borrow().as_ref() {
+            item.setTitle(ns_string!("Check for Updates"));
+        }
         let mtm = self.mtm();
         NSApplication::sharedApplication(mtm).activate();
         let alert = NSAlert::new(mtm);
@@ -741,7 +749,13 @@ impl AppDelegate {
         let wifi_reading = wifi::read_wifi();
         let mut battery_reading = battery::read_battery();
         battery_reading.health_percent = self.ivars().battery_health.borrow_mut().poll();
-        let battery_time_left_source = battery_reading.is_charging.and_then(|charging| {
+        let charging_state = battery_reading.is_charging.or_else(|| {
+            battery_reading
+                .power_source_state
+                .as_deref()
+                .map(|state| state != "AC Power")
+        });
+        let battery_time_left_source = charging_state.and_then(|charging| {
             self.ivars()
                 .battery_time_left
                 .borrow_mut()
@@ -1279,6 +1293,28 @@ impl AppDelegate {
         if let Some(v) = battery_reading.cycle_count {
             add_info_row(CAT_BATTERY, format!("  Battery Cycle Count: {v}"));
         }
+        let on_ac_power = battery_reading.power_source_state.as_deref() == Some("AC Power");
+        let battery_charging_state = battery_reading.is_charging.or_else(|| {
+            battery_reading
+                .power_source_state
+                .as_deref()
+                .map(|state| state != "AC Power")
+        });
+        if on_ac_power {
+            add_info_row(
+                CAT_BATTERY,
+                format!(
+                    "  Power: {}",
+                    if battery_reading.is_charging == Some(true) {
+                        "Charging"
+                    } else {
+                        "Plugged In"
+                    }
+                ),
+            );
+        } else if battery_reading.is_charging == Some(false) {
+            add_info_row(CAT_BATTERY, "  Power: On Battery".to_string());
+        }
         if let Some(v) = battery_reading.health_percent {
             add_info_row(CAT_BATTERY, format!("  Battery Health: {}", FormatKind::Percent.format(v, opts)));
         }
@@ -1291,7 +1327,29 @@ impl AppDelegate {
         if let Some(v) = battery_time_left_minutes {
             add_info_row(
                 CAT_BATTERY,
-                format!("  Battery Time Left: {}", FormatKind::Runtime.format(v * 60.0, opts)),
+                format!(
+                    "  {}: {}",
+                    if on_ac_power && battery_reading.is_charging == Some(true) {
+                        "Time to Full Charge"
+                    } else {
+                        "Battery Time Left"
+                    },
+                    FormatKind::Runtime.format(v * 60.0, opts)
+                ),
+            );
+        } else if let Some(charging) = battery_charging_state {
+            add_info_row(
+                CAT_BATTERY,
+                format!(
+                    "  {}",
+                    if on_ac_power && !charging {
+                        "Time to Full Charge: On hold (Optimized Charging)"
+                    } else if charging {
+                        "Time to Full Charge: Calculating…"
+                    } else {
+                        "Battery Time Left: Calculating…"
+                    }
+                ),
             );
         }
         match (gpu_reading.utilization_percent, &gpu_static.model_name) {
@@ -1355,6 +1413,7 @@ impl AppDelegate {
                     item.setAction(Some(action));
                 }
                 menu.addItem(&item);
+                item
             };
             action_row(Some("gauge"), "System Monitor", sel!(systemMonitorTapped:));
 
@@ -1389,7 +1448,8 @@ impl AppDelegate {
             cleaner_item.setEnabled(false);
             menu.addItem(&cleaner_item);
 
-            action_row(Some("arrow.triangle.2.circlepath"), &format!("Check for Updates (v{})", updater::CURRENT_VERSION), sel!(checkForUpdatesTapped:));
+            let update_item = action_row(Some("arrow.triangle.2.circlepath"), &format!("Check for Updates (v{})", updater::CURRENT_VERSION), sel!(checkForUpdatesTapped:));
+            *self.ivars().update_status_item.borrow_mut() = Some(update_item);
             action_row(Some("gearshape"), "Preferences", sel!(preferencesTapped:));
 
             self.ivars().menu_structure_built.set(true);

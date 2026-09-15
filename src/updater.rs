@@ -6,6 +6,7 @@
 use serde::Deserialize;
 use std::io::Read;
 use std::sync::mpsc;
+use std::time::Duration;
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const RELEASES_API: &str = "https://api.github.com/repos/nuflakbrr/pantau/releases/latest";
@@ -76,7 +77,11 @@ pub fn check_async() -> mpsc::Receiver<UpdateCheckResult> {
 /// caller is expected to call `NSApplication::terminate` on the main
 /// thread once this returns `Ok`, handing off to the freshly-installed copy.
 pub fn download_and_install(download_url: &str) -> Result<(), String> {
-    let mut reader = ureq::get(download_url).call().map_err(|e| e.to_string())?.into_reader();
+    let mut reader = ureq::get(download_url)
+        .timeout(Duration::from_secs(60))
+        .call()
+        .map_err(|e| e.to_string())?
+        .into_reader();
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
 
