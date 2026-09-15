@@ -23,7 +23,7 @@ jobs:
           VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Build release .zip
+      - name: Build release assets
         run: ./pkg/release.sh
 
       - name: Commit version bump and tag
@@ -40,5 +40,6 @@ jobs:
         run: |
           gh release create "v${{ steps.version.outputs.version }}" \
             "pkg/Pantau-v${{ steps.version.outputs.version }}.zip" \
+            "pkg/Pantau-v${{ steps.version.outputs.version }}.dmg" \
             --title "v${{ steps.version.outputs.version }}" \
             --generate-notes
