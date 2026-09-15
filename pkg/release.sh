@@ -31,12 +31,26 @@ ditto -c -k --keepParent "$APP" "$OUT"
 
 DMG_STAGE="$(mktemp -d)"
 cp -R "$APP" "$DMG_STAGE/Pantau.app"
-ln -s /Applications "$DMG_STAGE/Applications"
-DMG_RW="$(mktemp -t pantau-dmg).dmg"
-hdiutil create -volname "Pantau ${VERSION}" -srcfolder "$DMG_STAGE" -ov -format UDRW "$DMG_RW" >/dev/null
-DEVICE="$(hdiutil attach "$DMG_RW" -nobrowse -noautoopen | awk '/\/Volumes\// {print $1; exit}')"
-MOUNT_POINT="/Volumes/Pantau ${VERSION}"
+BACKGROUND="$(mktemp -t pantau-dmg-background).png"
+python3 pkg/dmg_background.py "$BACKGROUND"
+create-dmg \
+  --volname "Pantau ${VERSION}" \
+  --background "$BACKGROUND" \
+  --window-pos 100 100 \
+  --window-size 500 320 \
+  --icon-size 72 \
+  --icon "Pantau.app" 130 120 \
+  --app-drop-link 270 120 \
+  "$DMG" "$DMG_STAGE" >/dev/null
+rm -f "$BACKGROUND"
+rm -rf "$DMG_STAGE"
 
+POSTPROCESS_RW="$(mktemp -t pantau-dmg-postprocess).dmg"
+hdiutil convert "$DMG" -format UDRW -o "$POSTPROCESS_RW" >/dev/null
+MOUNT_OUTPUT="$(hdiutil attach "$POSTPROCESS_RW" -nobrowse -noautoopen)"
+MOUNT_POINT="$(printf '%s\n' "$MOUNT_OUTPUT" | awk '/\/Volumes\// {print substr($0, index($0,$3)); exit}')"
+SetFile -a V "$MOUNT_POINT/.background"
+chflags hidden "$MOUNT_POINT/.background"
 osascript <<EOF
 tell application "Finder"
   tell disk "Pantau ${VERSION}"
@@ -52,15 +66,13 @@ tell application "Finder"
     set bounds of container window to {100, 100, 500, 320}
     set position of item "Pantau.app" to {130, 90}
     set position of item "Applications" to {270, 90}
-    update without registering applications
   end tell
 end tell
 EOF
-
-hdiutil detach "$DEVICE" -force >/dev/null
-hdiutil convert "$DMG_RW" -format UDZO -o "$DMG" >/dev/null
-rm -f "$DMG_RW"
-rm -rf "$DMG_STAGE"
+hdiutil detach "$MOUNT_POINT" >/dev/null
+rm -f "$DMG"
+hdiutil convert "$POSTPROCESS_RW" -format UDZO -o "$DMG" >/dev/null
+rm -f "$POSTPROCESS_RW"
 rm -rf "$STAGE"
 
 echo "Built $OUT and $DMG — upload these as release assets tagged v${VERSION} on https://github.com/nuflakbrr/pantau/releases"

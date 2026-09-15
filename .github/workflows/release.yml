@@ -16,6 +16,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install DMG tooling
+        run: brew install create-dmg
+
       - name: Read version
         id: version
         run: |
