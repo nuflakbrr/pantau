@@ -15,6 +15,7 @@ const RELEASES_API: &str = "https://api.github.com/repos/nuflakbrr/pantau/releas
 struct Asset {
     name: String,
     browser_download_url: String,
+    size: u64,
 }
 
 #[derive(Deserialize)]
@@ -26,7 +27,7 @@ struct ReleaseResponse {
 #[derive(Debug, Clone)]
 pub enum UpdateCheckResult {
     UpToDate,
-    UpdateAvailable { version: String, download_url: String },
+    UpdateAvailable { version: String, download_url: String, total_size: u64 },
     Error(String),
 }
 
@@ -58,7 +59,11 @@ fn fetch() -> UpdateCheckResult {
     let Some(asset) = release.assets.iter().find(|a| a.name.ends_with(".zip")) else {
         return UpdateCheckResult::Error("Latest release has no .zip asset".to_string());
     };
-    UpdateCheckResult::UpdateAvailable { version: latest_version, download_url: asset.browser_download_url.clone() }
+    UpdateCheckResult::UpdateAvailable {
+        version: latest_version,
+        download_url: asset.browser_download_url.clone(),
+        total_size: asset.size,
+    }
 }
 
 /// Kicks off the version check on a background thread — a network round
@@ -76,14 +81,29 @@ pub fn check_async() -> mpsc::Receiver<UpdateCheckResult> {
 /// and relaunches. Runs on a background thread (network + disk I/O) — the
 /// caller is expected to call `NSApplication::terminate` on the main
 /// thread once this returns `Ok`, handing off to the freshly-installed copy.
-pub fn download_and_install(download_url: &str) -> Result<(), String> {
-    let mut reader = ureq::get(download_url)
+pub fn download_and_install(
+    download_url: &str,
+    expected_size: u64,
+    progress: std::sync::mpsc::Sender<(u64, Option<u64>)>,
+) -> Result<(), String> {
+    let response = ureq::get(download_url)
         .timeout(Duration::from_secs(60))
         .call()
-        .map_err(|e| e.to_string())?
-        .into_reader();
+        .map_err(|e| e.to_string())?;
+    let total = response.header("Content-Length").and_then(|v| v.parse().ok()).or((expected_size > 0).then_some(expected_size));
+    let mut reader = response.into_reader();
     let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    let mut buffer = [0u8; 64 * 1024];
+    let mut downloaded = 0u64;
+    loop {
+        let read = reader.read(&mut buffer).map_err(|e| e.to_string())?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+        downloaded += read as u64;
+        let _ = progress.send((downloaded, total));
+    }
 
     let tmp_dir = std::env::temp_dir().join(format!("pantau-update-{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;

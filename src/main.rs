@@ -12,12 +12,13 @@ use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly
 use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
     NSAttributedStringAttachmentConveniences, NSControlStateValueOff, NSFont,
-    NSFontWeightRegular, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem, NSTextAttachment,
+    NSButton, NSFontWeightRegular, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSProgressIndicator, NSStatusBar,
+    NSStatusItem, NSTextAttachment,
     NSVariableStatusItemLength,
 };
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSAttributedString, NSMutableAttributedString, NSNotification, NSObject,
-    NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer,
+    NSObjectProtocol, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
 };
 use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -229,6 +230,9 @@ struct AppDelegateIvars {
     /// thread (the freshly-downloaded copy is already launched by then),
     /// so there's nothing to marshal back for that case.
     update_install: RefCell<Option<std::sync::mpsc::Receiver<Result<(), String>>>>,
+    update_progress: RefCell<Option<std::sync::mpsc::Receiver<(u64, Option<u64>)>>>,
+    update_progress_indicator: RefCell<Option<Retained<NSProgressIndicator>>>,
+    update_alert: RefCell<Option<Retained<NSAlert>>>,
     update_status_item: RefCell<Option<Retained<NSMenuItem>>>,
     public_ip_watcher: RefCell<PublicIpWatcher>,
     /// `None` if `AppleSMC` couldn't be opened at all (should not happen on
@@ -454,6 +458,9 @@ impl AppDelegate {
             battery_health: RefCell::new(battery::BatteryHealthWatcher::new()),
             update_check: RefCell::new(None),
             update_install: RefCell::new(None),
+            update_progress: RefCell::new(None),
+            update_progress_indicator: RefCell::new(None),
+            update_alert: RefCell::new(None),
             update_status_item: RefCell::new(None),
             public_ip_watcher: RefCell::new(PublicIpWatcher::new()),
             smc: OnceCell::new(),
@@ -633,7 +640,7 @@ impl AppDelegate {
                 alert.addButtonWithTitle(&NSString::from_str("OK"));
                 alert.runModal();
             }
-            updater::UpdateCheckResult::UpdateAvailable { version, download_url } => {
+            updater::UpdateCheckResult::UpdateAvailable { version, download_url, total_size } => {
                 alert.setMessageText(&NSString::from_str("Update Available"));
                 alert.setInformativeText(&NSString::from_str(&format!(
                     "v{} is available (you have v{}). Download and install now?",
@@ -648,22 +655,67 @@ impl AppDelegate {
                         item.setTitle(ns_string!("Downloading update…"));
                     }
                     let (tx, rx) = std::sync::mpsc::channel();
+                    let (progress_tx, progress_rx) = std::sync::mpsc::channel();
                     std::thread::spawn(move || {
                         // The freshly-installed copy is already launched at
                         // this point on success (see `download_and_install`)
                         // — always report back to the main thread so it can
                         // show a confirmation alert before this instance
                         // exits, instead of exiting silently mid-download-thread.
-                        let outcome = updater::download_and_install(&download_url);
+                        let outcome = updater::download_and_install(&download_url, total_size, progress_tx);
                         let _ = tx.send(outcome);
                     });
                     *self.ivars().update_install.borrow_mut() = Some(rx);
+                    *self.ivars().update_progress.borrow_mut() = Some(progress_rx);
+                    let progress_indicator = NSProgressIndicator::initWithFrame(
+                        NSProgressIndicator::alloc(mtm),
+                        NSRect::new(Default::default(), NSSize::new(280.0, 20.0)),
+                    );
+                    progress_indicator.setIndeterminate(true);
+                    progress_indicator.setMinValue(0.0);
+                    progress_indicator.setMaxValue(100.0);
+                    progress_indicator.setDoubleValue(0.0);
+                    unsafe { progress_indicator.startAnimation(None); }
+                    alert.setMessageText(ns_string!("Downloading Update"));
+                    alert.setInformativeText(ns_string!("Downloading and installing Pantau. Please wait…"));
+                    alert.setAccessoryView(Some(&progress_indicator));
+                    let buttons = alert.buttons();
+                    for index in 0..buttons.count() {
+                        let button: Retained<NSButton> = buttons.objectAtIndex(index);
+                        button.setEnabled(false);
+                    }
+                    alert.layout();
+                    *self.ivars().update_progress_indicator.borrow_mut() = Some(progress_indicator);
+                    alert.window().makeKeyAndOrderFront(None);
+                    *self.ivars().update_alert.borrow_mut() = Some(alert);
                 }
             }
         }
     }
 
     fn poll_update_install(&self) {
+        let progress = {
+            let rx = self.ivars().update_progress.borrow();
+            rx.as_ref().and_then(|rx| rx.try_iter().last())
+        };
+        if let Some((downloaded, total)) = progress {
+            if let Some(indicator) = self.ivars().update_progress_indicator.borrow().as_ref() {
+                if let Some(size) = total.filter(|&size| size > 0) {
+                    indicator.setIndeterminate(false);
+                    indicator.setDoubleValue((downloaded as f64 / size as f64 * 100.0).min(100.0));
+                } else {
+                    indicator.setIndeterminate(true);
+                    unsafe { indicator.startAnimation(None); }
+                }
+            }
+            if let Some(item) = self.ivars().update_status_item.borrow().as_ref() {
+                let title = total
+                    .filter(|&size| size > 0)
+                    .map(|size| format!("Downloading update… {}%", downloaded * 100 / size))
+                    .unwrap_or_else(|| format!("Downloading update… {} KB", downloaded / 1024));
+                item.setTitle(&NSString::from_str(&title));
+            }
+        }
         let result = {
             let rx = self.ivars().update_install.borrow();
             rx.as_ref().and_then(|rx| rx.try_recv().ok())
@@ -672,6 +724,11 @@ impl AppDelegate {
             return;
         };
         *self.ivars().update_install.borrow_mut() = None;
+        *self.ivars().update_progress.borrow_mut() = None;
+        *self.ivars().update_progress_indicator.borrow_mut() = None;
+        if let Some(alert) = self.ivars().update_alert.borrow_mut().take() {
+            alert.window().close();
+        }
         if let Some(item) = self.ivars().update_status_item.borrow().as_ref() {
             item.setTitle(ns_string!("Check for Updates"));
         }
@@ -723,6 +780,8 @@ impl AppDelegate {
         };
         unsafe {
             NSRunLoop::currentRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
+            let modal_panel_mode = NSString::from_str("NSModalPanelRunLoopMode");
+            NSRunLoop::currentRunLoop().addTimer_forMode(&timer, &modal_panel_mode);
         }
         *self.ivars().timer.borrow_mut() = Some(timer);
     }
